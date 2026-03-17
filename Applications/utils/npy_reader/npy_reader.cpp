@@ -79,6 +79,8 @@ void NpyReader::read_npy_file(const char *file_path) {
   char *header_pos = header;
   if (*header_pos != '{') {
     ml_loge("Filed to read numpy file");
+    free(header);
+    fclose(file);
     return;
   }
 
@@ -99,6 +101,8 @@ void NpyReader::read_npy_file(const char *file_path) {
         header_pos += 3;
         if (*header_pos = !'(') {
           ml_loge("File to read numpy file");
+          free(header);
+          fclose(file);
           return;
         }
         ++header_pos;
