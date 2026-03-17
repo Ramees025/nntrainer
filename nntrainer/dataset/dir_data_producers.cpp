@@ -37,21 +37,21 @@
  */
 static void readImage(const std::string path, float *input, unsigned int width,
                       unsigned int height) {
-  FILE *f = fopen(path.c_str(), "rb");
+  std::unique_ptr<FILE, decltype(&fclose)> f(fopen(path.c_str(), "rb"), fclose);
 
   if (f == nullptr)
     throw std::invalid_argument("Cannot open file: " + path);
 
   unsigned char info[54];
-  size_t result = fread(info, sizeof(unsigned char), 54, f);
+  size_t result = fread(info, sizeof(unsigned char), 54, f.get());
   NNTR_THROW_IF(result != 54, std::invalid_argument)
     << "Cannot read bmp header";
 
   size_t row_padded = (width * 3 + 3) & (~3);
-  unsigned char *data = new unsigned char[row_padded];
+  std::vector<unsigned char> data(row_padded);
 
   for (unsigned int i = 0; i < height; i++) {
-    result = fread(data, sizeof(unsigned char), row_padded, f);
+    result = fread(data.data(), sizeof(unsigned char), row_padded, f.get());
     NNTR_THROW_IF(result != row_padded, std::invalid_argument)
       << "Cannot read bmp pixel data";
 
@@ -64,9 +64,6 @@ static void readImage(const std::string path, float *input, unsigned int width,
       input[(height * width) * 2 + height * i + j] = (float)data[j * 3];
     }
   }
-
-  delete[] data;
-  fclose(f);
 }
 
 namespace nntrainer {
