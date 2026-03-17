@@ -83,7 +83,7 @@ namespace exception {
  * @brief Error Notification class, error is thrown when the class is destroyed.
  * DO NOT use this outside as this contains throwing destructor.
  *
- * @tparam Err Error type that except cstring as an argument.
+ * @tparam Err Error type that accepts std::string (or compatible) argument.
  */
 template <typename Err,
           typename std::enable_if_t<std::is_base_of<std::exception, Err>::value,
@@ -122,7 +122,8 @@ public:
         std::cerr << "Exception during cleanup: " << e.what() << '\n';
       }
     }
-    throw Err(ss.str().c_str());
+    const auto error_msg = ss.str();
+    throw Err(error_msg);
   }
 
 #if defined(_MSC_VER)
