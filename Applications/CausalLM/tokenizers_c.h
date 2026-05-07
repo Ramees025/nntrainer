@@ -27,6 +27,19 @@ TokenizerHandle byte_level_bpe_tokenizers_new_from_str(
   const char *vocab, size_t vocab_len, const char *merges, size_t merges_len,
   const char *added_tokens, size_t added_tokens_len);
 
+// Construct a tokenizer from a binary blob produced by tokenizers_save_to_bin.
+// Returns nullptr if the blob is malformed (missing magic header or version
+// mismatch); the caller should fall back to JSON loading in that case.
+TokenizerHandle tokenizers_new_from_bin(const char *data, size_t len);
+
+// Persist the tokenizer behind `handle` to `path` in binary format. The path
+// argument is treated as raw bytes of length path_len (no NUL terminator
+// required). Returns 0 on success, negative on error:
+//   -1 invalid args, -2 bad utf8 path, -3 serialization failure,
+//   -4 write failure, -5 atomic rename failure.
+int tokenizers_save_to_bin(TokenizerHandle handle, const char *path,
+                           size_t path_len);
+
 void tokenizers_encode(TokenizerHandle handle, const char *data, size_t len,
                        int add_special_token, TokenizerEncodeResult *result);
 

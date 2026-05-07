@@ -79,6 +79,29 @@ cd "$BUILD_DIR/tokenizers-cpp"
 echo "Updating submodules..."
 git submodule update --init --recursive
 
+# Apply nntrainer patches (binary tokenizer I/O extension)
+PATCH_SCRIPT="$SCRIPT_DIR/patches/apply_patches.sh"
+PATCH_STAMP="$BUILD_DIR/tokenizers-cpp/.nntrainer_patch_stamp"
+if [ -f "$PATCH_SCRIPT" ]; then
+    PATCH_HASH=""
+    if command -v sha256sum >/dev/null 2>&1; then
+        PATCH_HASH=$(sha256sum "$SCRIPT_DIR/patches/bin_io_append.rs" "$PATCH_SCRIPT" 2>/dev/null | awk '{print $1}' | tr -d '\n')
+    elif command -v shasum >/dev/null 2>&1; then
+        PATCH_HASH=$(shasum -a 256 "$SCRIPT_DIR/patches/bin_io_append.rs" "$PATCH_SCRIPT" 2>/dev/null | awk '{print $1}' | tr -d '\n')
+    fi
+    if [ ! -f "$PATCH_STAMP" ] || [ "$(cat "$PATCH_STAMP" 2>/dev/null)" != "$PATCH_HASH" ]; then
+        echo "Applying nntrainer patches..."
+        bash "$PATCH_SCRIPT" "$BUILD_DIR/tokenizers-cpp"
+        echo "$PATCH_HASH" > "$PATCH_STAMP"
+        # Force rebuild when patches change.
+        rm -rf "$BUILD_DIR/tokenizers-cpp/build-android-$TARGET_ABI"
+    else
+        echo "nntrainer patches already up to date."
+    fi
+else
+    echo "Warning: nntrainer patch script not found at $PATCH_SCRIPT"
+fi
+
 # Create build directory for specific ABI
 mkdir -p "build-android-$TARGET_ABI"
 cd "build-android-$TARGET_ABI"

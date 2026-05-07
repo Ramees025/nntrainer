@@ -92,6 +92,55 @@ public:
    * @return The created tokenzier.
    */
   static std::unique_ptr<Tokenizer> FromBlobJSON(const std::string &json_blob);
+
+  /**
+   * @brief Create HF tokenizer from a binary blob written by SaveBinary().
+   *
+   * The blob carries a magic header / version so callers can recover from a
+   * mismatched format by falling back to FromBlobJSON. Returns nullptr when
+   * the blob does not match the expected format.
+   *
+   * @param bin_blob The binary blob (full file contents including header).
+   * @return The created tokenizer, or nullptr if the blob is invalid.
+   */
+  static std::unique_ptr<Tokenizer>
+  FromBlobBinary(const std::string &bin_blob);
+
+  /**
+   * @brief Persist this tokenizer to disk in fast-loading binary format.
+   *
+   * Returns true on success. Default implementation returns false; concrete
+   * tokenizer types that support binary serialization override this.
+   *
+   * @param path Destination file path.
+   */
+  virtual bool SaveBinary(const std::string &path) {
+    (void)path;
+    return false;
+  }
+
+  /**
+   * @brief Unified file-based loader that prefers binary format.
+   *
+   * Resolution order:
+   *   1. If `path` ends with ".bin", attempt FromBlobBinary on `path` only;
+   *      throws on any failure (no JSON fallback when binary was explicitly
+   *      requested).
+   *   2. Otherwise, attempt to load `<path>.bin` first. If it exists and
+   *      parses cleanly, use it.
+   *   3. Otherwise, load `path` as JSON via FromBlobJSON. When `auto_cache`
+   *      is true and the JSON load succeeded, the loaded tokenizer is dumped
+   *      to `<path>.bin` so subsequent runs hit step 2.
+   *
+   * Magic-header / version mismatches in step 2 trigger a one-time warning
+   * and silently fall through to step 3.
+   *
+   * @param path Path to the tokenizer.json (or tokenizer.bin) file.
+   * @param auto_cache When true (default), produce a `.bin` cache next to the
+   *                   JSON on first load.
+   */
+  static std::unique_ptr<Tokenizer> FromFile(const std::string &path,
+                                             bool auto_cache = true);
   /**
    * @brief Create BPE tokenizer
    *

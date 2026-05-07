@@ -8,6 +8,12 @@
 #include <tokenizers_cpp.h>
 
 #include <cassert>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <mutex>
+#include <stdexcept>
 
 namespace tokenizers {
 /*!
@@ -111,6 +117,14 @@ public:
     return id;
   }
 
+  bool SaveBinary(const std::string &path) final {
+    if (handle_ == nullptr) {
+      return false;
+    }
+    int rc = tokenizers_save_to_bin(handle_, path.data(), path.length());
+    return rc == 0;
+  }
+
 private:
   // internal handle
   TokenizerHandle handle_{nullptr};
@@ -129,4 +143,110 @@ Tokenizer::FromBlobByteLevelBPE(const std::string &vocab,
     vocab.data(), vocab.length(), merges.data(), merges.length(),
     added_tokens.data(), added_tokens.length()));
 }
+
+namespace {
+
+// 9-byte magic + 4-byte LE u32 version. Must match patches/bin_io_append.rs.
+constexpr const char kBinMagic[] = "NTRTKBIN";
+constexpr size_t kBinMagicLen = 9;     // includes the trailing NUL
+constexpr size_t kBinHeaderLen = kBinMagicLen + 4;
+
+bool HasBinaryHeader(const std::string &blob) {
+  if (blob.size() < kBinHeaderLen) {
+    return false;
+  }
+  return std::memcmp(blob.data(), kBinMagic, kBinMagicLen) == 0;
+}
+
+bool LoadFileToString(const std::string &path, std::string &out) {
+  std::ifstream f(path, std::ios::binary | std::ios::ate);
+  if (!f.is_open()) {
+    return false;
+  }
+  std::streamsize size = f.tellg();
+  if (size < 0) {
+    return false;
+  }
+  f.seekg(0, std::ios::beg);
+  out.assign(static_cast<size_t>(size), '\0');
+  if (size > 0 && !f.read(&out[0], size)) {
+    return false;
+  }
+  return true;
+}
+
+// Emit `msg` to stderr at most once for the given `flag`. Each distinct
+// warning site should pass its own static once_flag so unrelated warnings do
+// not suppress one another.
+void WarnOnce(std::once_flag &flag, const std::string &msg) {
+  std::call_once(flag, [&] {
+    std::cerr << "[tokenizer] " << msg << std::endl;
+  });
+}
+
+} // namespace
+
+std::unique_ptr<Tokenizer>
+Tokenizer::FromBlobBinary(const std::string &bin_blob) {
+  if (!HasBinaryHeader(bin_blob)) {
+    return nullptr;
+  }
+  TokenizerHandle handle =
+    tokenizers_new_from_bin(bin_blob.data(), bin_blob.length());
+  if (handle == nullptr) {
+    return nullptr;
+  }
+  return std::make_unique<HFTokenizer>(handle);
+}
+
+std::unique_ptr<Tokenizer> Tokenizer::FromFile(const std::string &path,
+                                               bool auto_cache) {
+  // Detect whether the caller explicitly asked for the binary format.
+  const bool explicit_bin =
+    path.size() >= 4 &&
+    path.compare(path.size() - 4, 4, ".bin") == 0;
+
+  const std::string bin_path = explicit_bin ? path : (path + ".bin");
+
+  // Step 1: try the binary cache.
+  {
+    std::string blob;
+    if (LoadFileToString(bin_path, blob)) {
+      auto tok = FromBlobBinary(blob);
+      if (tok != nullptr) {
+        return tok;
+      }
+      static std::once_flag stale_cache_flag;
+      WarnOnce(stale_cache_flag,
+               "binary tokenizer cache " + bin_path +
+                 " is incompatible (magic/version mismatch); falling back to "
+                 "JSON.");
+    }
+  }
+
+  // Step 2: caller asked for the binary path explicitly but it could not be
+  // loaded; nothing else to try.
+  if (explicit_bin) {
+    throw std::runtime_error("Failed to load binary tokenizer: " + path);
+  }
+
+  // Step 3: load JSON.
+  std::string json_blob;
+  if (!LoadFileToString(path, json_blob)) {
+    throw std::runtime_error("Failed to open tokenizer file: " + path);
+  }
+  auto tok = FromBlobJSON(json_blob);
+
+  // Step 4: opportunistically dump a binary cache for next time.
+  if (auto_cache && tok != nullptr) {
+    if (!tok->SaveBinary(bin_path)) {
+      static std::once_flag write_fail_flag;
+      WarnOnce(write_fail_flag,
+               "failed to write binary tokenizer cache to " + bin_path +
+                 "; subsequent loads will continue to use JSON.");
+    }
+  }
+  return tok;
+}
+
 } // namespace tokenizers

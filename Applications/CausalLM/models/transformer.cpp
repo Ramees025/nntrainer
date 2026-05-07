@@ -10,8 +10,6 @@
  * @brief  This file defines Transformer's basic actions
  */
 
-#include <fstream>
-
 #include <app_context.h>
 #include <engine.h>
 #include <model.h>
@@ -27,21 +25,6 @@
 #include <tie_word_embedding.h>
 
 namespace causallm {
-
-std::string LoadBytesFromFile(const std::string &path) {
-  std::ifstream file(path, std::ios::binary | std::ios::ate);
-  if (!file.is_open()) {
-    throw std::runtime_error("Failed to open file: " + path);
-  }
-  std::streamsize size = file.tellg();
-  file.seekg(0, std::ios::beg);
-
-  std::string buffer(size, ' ');
-  if (!file.read(&buffer[0], size)) {
-    throw std::runtime_error("Failed to read file: " + path);
-  }
-  return buffer;
-}
 
 ModelType strToModelType(std::string model_type) {
 
@@ -83,8 +66,11 @@ Transformer::Transformer(json &cfg, json &generation_cfg, json &nntr_cfg,
   setupParameters(cfg, generation_cfg, nntr_cfg);
 
   // prep tokenizer
-  tokenizer = tokenizers::Tokenizer::FromBlobJSON(
-    LoadBytesFromFile(nntr_cfg["tokenizer_file"]));
+  // FromFile prefers a precomputed `<tokenizer_file>.bin` cache and
+  // transparently falls back to JSON on first run, persisting the binary
+  // cache for subsequent loads. See tokenizers_cpp.h for details.
+  tokenizer = tokenizers::Tokenizer::FromFile(
+    nntr_cfg["tokenizer_file"].get<std::string>(), /*auto_cache=*/true);
 };
 
 void Transformer::setupParameters(json &cfg, json &generation_cfg,

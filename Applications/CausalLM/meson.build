@@ -98,3 +98,15 @@ test_api = executable('test_api',
     build_by_default: true,
     install: false,
 )
+
+test_tokenizer_bin_src = [
+    meson.current_source_dir() / 'test_tokenizer_bin.cpp',
+]
+
+test_tokenizer_bin = executable('test_tokenizer_bin',
+    test_tokenizer_bin_src,
+    include_directories: causallm_inc,
+    dependencies: [nntrainer_dep, nntrainer_ccapi_dep, causallm_layer_dependencies, causallm_dep],
+    build_by_default: true,
+    install: false,
+)
