@@ -75,6 +75,7 @@ def collect_qwen3_moe_for_nntrainer(params, config, dtype):
         named.append((nntr_name, _to_np(t, dtype, transpose)))
 
     def add_proj(nntr_layer, hf_key):
+        """Add a fully_connected weight (and optional LoRA weights)."""
         lora_key = f"{hf_key}.lora_A.default.weight"
         if lora_key in params:
             add(f"{nntr_layer}:weight",       params[f"{hf_key}.base_layer.weight"], True)
@@ -91,7 +92,7 @@ def collect_qwen3_moe_for_nntrainer(params, config, dtype):
 
         add(f"{li}_attention_norm:gamma", params[f"{lp}input_layernorm.weight"])
 
-        # Q → q_norm → K → k_norm → V → O
+        # Q -> q_norm -> K -> k_norm -> V -> O  (Qwen3 attention order)
         add_proj(f"{li}_wq", f"{lp}self_attn.q_proj")
         if f"{lp}self_attn.q_norm.weight" in params:
             add(f"{li}_q_norm:gamma", params[f"{lp}self_attn.q_norm.weight"])
@@ -103,57 +104,19 @@ def collect_qwen3_moe_for_nntrainer(params, config, dtype):
 
         add(f"{li}_ffn_norm:gamma", params[f"{lp}post_attention_layernorm.weight"])
 
-        # MoE layer: gate router + per-expert weights
-        # All stored under nntrainer layer name "layer{i}_ffn_down" (type qwen_moe)
+        # MoE layer (qwen_moe type) stored under nntrainer layer "layer{i}_ffn_down".
+        # Expert weights use custom roles (expert_up_N, expert_gate_N, expert_down_N),
+        # not the standard :weight role, so they must be added directly.
         add(f"{li}_ffn_down:gate", params[f"{lp}mlp.gate.weight"], True)
-        for e in range(n_experts):
-            ep = f"{lp}mlp.experts.{e}."
-            add_proj(f"{li}_ffn_down:expert_up_{e}".replace(":expert", "@expert").replace("@", ":"),
-                     f"{ep}up_proj")
-
-        # Re-add properly (fix the name logic above)
-        named_len_before = len(named)
-        # Remove incorrectly added expert entries
-        del named[named_len_before - n_experts:]
 
         for e in range(n_experts):
             ep = f"{lp}mlp.experts.{e}."
-            lora_up   = f"{ep}up_proj.lora_A.default.weight"
-            lora_gate = f"{ep}gate_proj.lora_A.default.weight"
-            lora_down = f"{ep}down_proj.lora_A.default.weight"
-
-            if lora_up in params:
-                named.append((f"{li}_ffn_down:expert_up_{e}",
-                              _to_np(params[f"{ep}up_proj.base_layer.weight"], dtype, True)))
-                named.append((f"{li}_ffn_down:expert_up_{e}_lora_A",
-                              _to_np(params[lora_up], dtype, True)))
-                named.append((f"{li}_ffn_down:expert_up_{e}_lora_B",
-                              _to_np(params[f"{ep}up_proj.lora_B.default.weight"], dtype, True)))
-            else:
-                named.append((f"{li}_ffn_down:expert_up_{e}",
-                              _to_np(params[f"{ep}up_proj.weight"], dtype, True)))
-
-            if lora_gate in params:
-                named.append((f"{li}_ffn_down:expert_gate_{e}",
-                              _to_np(params[f"{ep}gate_proj.base_layer.weight"], dtype, True)))
-                named.append((f"{li}_ffn_down:expert_gate_{e}_lora_A",
-                              _to_np(params[lora_gate], dtype, True)))
-                named.append((f"{li}_ffn_down:expert_gate_{e}_lora_B",
-                              _to_np(params[f"{ep}gate_proj.lora_B.default.weight"], dtype, True)))
-            else:
-                named.append((f"{li}_ffn_down:expert_gate_{e}",
-                              _to_np(params[f"{ep}gate_proj.weight"], dtype, True)))
-
-            if lora_down in params:
-                named.append((f"{li}_ffn_down:expert_down_{e}",
-                              _to_np(params[f"{ep}down_proj.base_layer.weight"], dtype, True)))
-                named.append((f"{li}_ffn_down:expert_down_{e}_lora_A",
-                              _to_np(params[lora_down], dtype, True)))
-                named.append((f"{li}_ffn_down:expert_down_{e}_lora_B",
-                              _to_np(params[f"{ep}down_proj.lora_B.default.weight"], dtype, True)))
-            else:
-                named.append((f"{li}_ffn_down:expert_down_{e}",
-                              _to_np(params[f"{ep}down_proj.weight"], dtype, True)))
+            named.append((f"{li}_ffn_down:expert_up_{e}",
+                          _to_np(params[f"{ep}up_proj.weight"], dtype, True)))
+            named.append((f"{li}_ffn_down:expert_gate_{e}",
+                          _to_np(params[f"{ep}gate_proj.weight"], dtype, True)))
+            named.append((f"{li}_ffn_down:expert_down_{e}",
+                          _to_np(params[f"{ep}down_proj.weight"], dtype, True)))
 
     add("output_norm:gamma",         params["model.norm.weight"])
     add("output_of_causallm:weight", params["lm_head.weight"], True)
