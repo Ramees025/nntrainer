@@ -10,10 +10,14 @@
  * @brief  This file defines Transformer's basic actions
  */
 
+#include <cstring>
 #include <fstream>
+#include <unordered_map>
+#include <vector>
 
 #include <app_context.h>
 #include <engine.h>
+#include <layer_context.h>
 #include <model.h>
 
 #include <llm_util.hpp>
@@ -228,12 +232,82 @@ void Transformer::load_weight(const std::string &weight_path) {
       "initialize() before load_weight().");
   }
 
-  try {
-    model->load(weight_path, ml::train::ModelFormat::MODEL_FORMAT_BIN);
-  } catch (const std::exception &e) {
-    throw std::runtime_error("Failed to load model weights: " +
-                             std::string(e.what()));
+  // Detect nntrainer safetensors format by file extension
+  const bool is_safetensors =
+    weight_path.size() >= 12 &&
+    weight_path.compare(weight_path.size() - 12, 12, ".safetensors") == 0;
+
+  if (!is_safetensors) {
+    try {
+      model->load(weight_path, ml::train::ModelFormat::MODEL_FORMAT_BIN);
+    } catch (const std::exception &e) {
+      throw std::runtime_error("Failed to load model weights: " +
+                               std::string(e.what()));
+    }
+    return;
   }
+
+  // nntrainer safetensors format:
+  //   [8 bytes : header_size, uint64 LE]
+  //   [header_size bytes : JSON header, padded to 8-byte boundary]
+  //   [raw tensor data, concatenated in header order]
+  //
+  // JSON key format: "<layer_name>:<weight_role>"
+  //   e.g. "layer0_wq:weight", "layer0_q_norm:gamma"
+  // This matches nntrainer's internal naming: prefix + ":" + name
+  // (see InitLayerContext::requestWeight in layer_context.h)
+
+  std::ifstream fs(weight_path, std::ios::binary | std::ios::ate);
+  if (!fs.is_open())
+    throw std::runtime_error("Cannot open safetensors file: " + weight_path);
+  const size_t file_size = static_cast<size_t>(fs.tellg());
+  fs.seekg(0);
+  std::vector<char> buf(file_size);
+  fs.read(buf.data(), static_cast<std::streamsize>(file_size));
+  fs.close();
+
+  if (file_size < 8)
+    throw std::runtime_error("File too small to be a safetensors: " +
+                             weight_path);
+
+  uint64_t header_bytes = 0;
+  std::memcpy(&header_bytes, buf.data(), sizeof(uint64_t));
+  const size_t data_start = 8 + static_cast<size_t>(header_bytes);
+  if (data_start > file_size)
+    throw std::runtime_error("Corrupted safetensors header: " + weight_path);
+
+  const json hdr =
+    json::parse(std::string(buf.data() + 8, static_cast<size_t>(header_bytes)));
+
+  // Build name -> (absolute offset in buf, byte size) lookup map
+  std::unordered_map<std::string, std::pair<size_t, size_t>> st_map;
+  st_map.reserve(hdr.size());
+  for (auto &[key, val] : hdr.items()) {
+    if (key == "__metadata__")
+      continue;
+    const auto &offsets = val.at("data_offsets");
+    const size_t beg = data_start + offsets[0].get<size_t>();
+    const size_t end = data_start + offsets[1].get<size_t>();
+    st_map.emplace(key, std::make_pair(beg, end - beg));
+  }
+
+  // Iterate model layers in topological sort order.
+  // For safetensors the iteration order does not matter because weight
+  // lookup is name-based, but forEachLayer is the only way to reach
+  // weights through the public Model API.
+  model->forEachLayer([&](ml::train::Layer & /*layer*/,
+                           nntrainer::RunLayerContext &ctx, void *) {
+    for (unsigned int i = 0; i < ctx.getNumWeights(); ++i) {
+      const std::string &name = ctx.getWeightName(i);
+      auto it = st_map.find(name);
+      if (it == st_map.end())
+        continue; // shared weight or weight not present in file
+
+      nntrainer::Tensor &w = ctx.getWeight(i);
+      std::memcpy(w.getData<float>(), buf.data() + it->second.first,
+                  it->second.second);
+    }
+  });
 };
 
 void Transformer::save_weight(const std::string &weight_path) {
