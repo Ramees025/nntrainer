@@ -1,5 +1,5 @@
 ## @file weight_converter.py
-## @brief weight conversion script for qwen3 model
+## @brief weight conversion script for qwen3-0.6b model
 ## @author Eunju Yang <ej.yang@samsung.com>
 
 import argparse
@@ -68,7 +68,7 @@ def collect_qwen3_for_nntrainer(params, n_layers, dtype):
     def add_proj(nntr_layer, hf_key):
         lora_key = f"{hf_key}.lora_A.default.weight"
         if lora_key in params:
-            add(f"{nntr_layer}:weight",       params[f"{hf_key}.base_layer.weight"], True)
+            add(f"{nntr_layer}:weight",        params[f"{hf_key}.base_layer.weight"], True)
             add(f"{nntr_layer}:lora_A_weight", params[lora_key], True)
             add(f"{nntr_layer}:lora_B_weight", params[f"{hf_key}.lora_B.default.weight"], True)
         else:
@@ -97,15 +97,15 @@ def collect_qwen3_for_nntrainer(params, n_layers, dtype):
         add_proj(f"{li}_ffn_gate", f"{lp}mlp.gate_proj")
         add_proj(f"{li}_ffn_down", f"{lp}mlp.down_proj")
 
-    add("output_norm:gamma",          params["model.norm.weight"])
-    add("output_of_causallm:weight",  params["lm_head.weight"], True)
+    add("output_norm:gamma",         params["model.norm.weight"])
+    add("output_of_causallm:weight", params["lm_head.weight"], True)
     return named
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path",  type=str, default="./Qwen3-4b")
-    parser.add_argument("--output_name", type=str, default="./nntr_qwen3_4b_fp32.bin")
+    parser.add_argument("--model_path",  type=str, default="Qwen/Qwen3-0.6B")
+    parser.add_argument("--output_name", type=str, default="./nntr_qwen3_0.6b_fp32.bin")
     parser.add_argument("--data_type",   type=str, default="float32")
     args = parser.parse_args()
 
@@ -119,7 +119,7 @@ if __name__ == "__main__":
     model.eval()
 
     if output_name.endswith('.safetensors'):
-        # res/ is two levels up from res/qwen3/qwen3-4b/
+        # res/ is two levels up from res/qwen3/qwen3-0.6b/
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
         from safetensors_util import write_safetensors, verify_safetensors
         named = collect_qwen3_for_nntrainer(model.state_dict(), config.num_hidden_layers, data_dtype)
