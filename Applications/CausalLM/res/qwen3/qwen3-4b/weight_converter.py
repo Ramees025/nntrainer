@@ -74,7 +74,8 @@ def collect_qwen3_for_nntrainer(params, n_layers, dtype):
         else:
             add(f"{nntr_layer}:weight", params[f"{hf_key}.weight"], True)
 
-    add("embedding0:weight", params["model.embed_tokens.weight"])
+    # EmbeddingLayer and TieWordEmbedding both register weight as "Embedding"
+    add("embedding0:Embedding", params["model.embed_tokens.weight"])
 
     for i in range(n_layers):
         lp = f"model.layers.{i}."  # HF layer prefix
@@ -98,6 +99,8 @@ def collect_qwen3_for_nntrainer(params, n_layers, dtype):
         add_proj(f"{li}_ffn_down", f"{lp}mlp.down_proj")
 
     add("output_norm:gamma",          params["model.norm.weight"])
+    # LmHeadLayer uses "weight"; tie_word_embeddings=true shares embedding0 so
+    # this key is harmlessly ignored by the safetensors loader in that case.
     add("output_of_causallm:weight",  params["lm_head.weight"], True)
     return named
 
