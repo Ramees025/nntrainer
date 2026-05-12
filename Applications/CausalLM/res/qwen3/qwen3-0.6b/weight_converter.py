@@ -10,8 +10,16 @@ import numpy as np
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 
 
-def save_qwen3_for_nntrainer(params, n_layers, dtype, file):
-    """Convert and save weights as nntrainer binary format for Qwen3."""
+def save_qwen3_for_nntrainer(params, n_layers, dtype, file, tie_word_embeddings=False):
+    """Convert and save weights as nntrainer binary format for Qwen3.
+
+    tie_word_embeddings: when True, embedding0 and output_of_causallm share
+    the same weight tensor in nntrainer. TieWordEmbedding.read() is a no-op
+    for the lm_head instance, so the lm_head weight must NOT be written to
+    the binary file (the reader would never consume those bytes, causing the
+    file to have trailing garbage that confuses format-detection logic).
+    When False, LmHeadLayer reads its own weight, so we DO write it.
+    """
 
     def save_weight(weight):
         np.array(weight, dtype=dtype).tofile(file)
@@ -44,7 +52,12 @@ def save_qwen3_for_nntrainer(params, n_layers, dtype, file):
         save_attention(layer_prefix)
         save_feed_forward(layer_prefix)
     save_weight(params["model.norm.weight"])
-    save_weight(params["lm_head.weight"].permute(1, 0))
+
+    # Tied: TieWordEmbedding(lm_head mode).read() is a no-op; the shared
+    # weight was already read with embedding0 -> do not write lm_head bytes.
+    # Non-tied: LmHeadLayer reads its own weight -> write transposed weight.
+    if not tie_word_embeddings:
+        save_weight(params["lm_head.weight"].permute(1, 0))
 
 
 def _to_np(t, dtype, transpose=False):
@@ -58,8 +71,18 @@ def _to_np(t, dtype, transpose=False):
     return np.array(arr, dtype=dtype)
 
 
-def collect_qwen3_for_nntrainer(params, n_layers, dtype):
-    """Return list of (nntrainer_name, ndarray) pairs for safetensors output."""
+def collect_qwen3_for_nntrainer(params, n_layers, dtype, tie_word_embeddings=False):
+    """Return list of (nntrainer_name, ndarray) pairs for safetensors output.
+
+    Key naming rules (from requestWeight() calls in the layer implementations):
+      EmbeddingLayer / TieWordEmbedding(embedding mode) -> "<layer>:Embedding"
+      LmHeadLayer                                       -> "<layer>:weight"
+      TieWordEmbedding(lm_head mode, shared)            -> "<layer>:Embedding"
+        but shared with embedding0, so forEachLayer lookup returns nothing
+        and the loader's 'not found -> continue' path handles it correctly.
+      RMSNormLayer / ReshapedRMSNormLayer               -> "<layer>:gamma"
+      fully_connected (wq/wk/wv/etc.)                   -> "<layer>:weight"
+    """
     named = []
 
     def add(nntr_name, t, transpose=False):
@@ -74,7 +97,8 @@ def collect_qwen3_for_nntrainer(params, n_layers, dtype):
         else:
             add(f"{nntr_layer}:weight", params[f"{hf_key}.weight"], True)
 
-    # EmbeddingLayer and TieWordEmbedding both register weight as "Embedding"
+    # Both EmbeddingLayer and TieWordEmbedding register their weight as
+    # "Embedding", so the nntrainer internal name is "embedding0:Embedding".
     add("embedding0:Embedding", params["model.embed_tokens.weight"])
 
     for i in range(n_layers):
@@ -83,7 +107,7 @@ def collect_qwen3_for_nntrainer(params, n_layers, dtype):
 
         add(f"{li}_attention_norm:gamma", params[f"{lp}input_layernorm.weight"])
 
-        # Q -> q_norm -> K -> k_norm -> V -> O  (Qwen3 attention order)
+        # Topo-sort order: wq -> q_norm -> wk -> k_norm -> wv -> attention_out
         add_proj(f"{li}_wq", f"{lp}self_attn.q_proj")
         if f"{lp}self_attn.q_norm.weight" in params:
             add(f"{li}_q_norm:gamma", params[f"{lp}self_attn.q_norm.weight"])
@@ -98,10 +122,18 @@ def collect_qwen3_for_nntrainer(params, n_layers, dtype):
         add_proj(f"{li}_ffn_gate", f"{lp}mlp.gate_proj")
         add_proj(f"{li}_ffn_down", f"{lp}mlp.down_proj")
 
-    add("output_norm:gamma",         params["model.norm.weight"])
-    # LmHeadLayer uses "weight"; tie_word_embeddings=true shares embedding0 so
-    # this key is harmlessly ignored by the safetensors loader in that case.
-    add("output_of_causallm:weight", params["lm_head.weight"], True)
+    add("output_norm:gamma", params["model.norm.weight"])
+
+    # Tied: output_of_causallm is TieWordEmbedding(lm_head mode) sharing
+    # embedding0's weight. forEachLayer will look up "output_of_causallm:Embedding"
+    # -> not found in file -> loader skips -> shared weight already set. Correct.
+    #
+    # Non-tied: output_of_causallm is LmHeadLayer with weight name "weight".
+    # LmHeadLayer stores [hidden x vocab] and computes dot(input, weight),
+    # so we must transpose lm_head.weight here.
+    if not tie_word_embeddings:
+        add("output_of_causallm:weight", params["lm_head.weight"], True)
+
     return named
 
 
@@ -121,13 +153,17 @@ if __name__ == "__main__":
     model     = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype="float", trust_remote_code=True)
     model.eval()
 
+    is_tied = getattr(config, 'tie_word_embeddings', False)
+
     if output_name.endswith('.safetensors'):
         # res/ is two levels up from res/qwen3/qwen3-0.6b/
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
         from safetensors_util import write_safetensors, verify_safetensors
-        named = collect_qwen3_for_nntrainer(model.state_dict(), config.num_hidden_layers, data_dtype)
+        named = collect_qwen3_for_nntrainer(
+            model.state_dict(), config.num_hidden_layers, data_dtype, is_tied)
         write_safetensors(output_name, named)
         verify_safetensors(output_name)
     else:
         with open(output_name, "wb") as f:
-            save_qwen3_for_nntrainer(model.state_dict(), config.num_hidden_layers, data_dtype, f)
+            save_qwen3_for_nntrainer(
+                model.state_dict(), config.num_hidden_layers, data_dtype, f, is_tied)
