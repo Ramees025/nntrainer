@@ -6,8 +6,10 @@
 순서로 내려가고, 마지막에 **다른 vendor 가 새 Context 를 추가하는 방법**을
 설명한다.
 
-> 영문 설계 계약서는 [`ARCHITECTURE.md`](./ARCHITECTURE.md) 를 참고. 이 문서는
-> 그 내용을 그림과 함께 한글로 풀어 쓴 것이다.
+> 내용은 ARCHITECTURE.md 요약이 아니라 **소스 코드를 직접 분석**해
+> 작성했다 (파일:라인 인용 포함). 영문판은
+> [`PLUGGABLE_EN.md`](./PLUGGABLE_EN.md), 설계 계약·근거는
+> [`ARCHITECTURE.md`](./ARCHITECTURE.md) 를 참고.
 
 ---
 
@@ -429,6 +431,53 @@ ASCII 요약:
   │
   └─ CPU 텐서 ─▶ g_compute_ops (x86 AVX2 / ARM NEON / scalar fallback)
 ```
+
+### 6.3 빌드 타임 선택 — CPU arch 만의 이야기가 아니다 (중요)
+
+> **핵심: 어떤 vendor 가 살아있는지는 런타임 분기가 아니라 빌드 타임에
+> 결정된다.** 호출 지점에는 `#ifdef` 가 없고, 단지 그 빌드에 *컴파일되어
+> 등록된 Context 집합*만 달라진다.
+
+**(1) CPU 자체가 arch 별로 갈린다.** CPU 백엔드는 한 덩어리 코드가
+아니다. `nntrainer/tensor/cpu_backend/` 아래에 형제 구현 3개가 있고,
+`cpu_backend/meson.build` 가 `host_machine.cpu_family()` 로 **빌드 시
+하나만** 고른다:
+
+```
+cpu_backend/
+ ├─ arm/       NEON 커널        ← arm / aarch64 / android
+ ├─ x86/       AVX2 + ggml/BLAS ← x86_64 / x86
+ └─ fallback/  scalar           ← 그 외
+```
+
+세 구현 모두 자기 `init_backend()` 끝에서 `g_compute_ops =
+get_cpu_ops()` 로 같은 `CpuComputeOps`(`cpu_ops_table.cpp`)를 바인딩한다.
+즉 호출 지점에서는 여전히 `g_compute_ops` 하나지만, **그 안에 박힌
+커널 본체가 NEON / AVX2 / scalar 로 갈린 것**이다. 런타임 CPUID 분기가
+아니라 빌드 타임 선택이다.
+
+**(2) 같은 원리가 vendor 백엔드 전체에 적용된다.** QNN, GPU(OpenCL),
+그리고 앞으로 추가될 **S.LSI / MediaTek(MT) 등도 동일한 방식**이다 —
+각 vendor 가 meson 옵션 뒤로 게이팅되고, 그 옵션이 켜진 빌드에서만
+해당 Context 가 `Engine` 에 등록된다:
+
+| 대상 | 게이트 (meson) | 등록 방식 |
+|---|---|---|
+| CPU arch (NEON/AVX2/scalar) | `host_machine.cpu_family()` | 빌드 타임 subdir 선택 |
+| GPU (OpenCL) | `enable-opencl` | 빌트인 `registerContext("gpu", …)` |
+| QNN (NPU) | `enable-npu` (+ `qnn-sdk-root`) | 플러그인 `.so` 로드 |
+| S.LSI / MT 등 (예정) | `enable-<vendor>` | 빌트인 또는 `.so` (벤더 선택) |
+
+```
+빌드 A (x86 + opencl)        빌드 B (arm + npu)
+ Engine.engines = {            Engine.engines = {
+   "cpu"  (x86 AVX2),            "cpu"  (ARM NEON),
+   "gpu"  (ClContext) }          "qnn"  (libqnn_context.so) }
+```
+
+→ 정리하면, **"하나의 디스패치 인터페이스 + 빌드 타임에 고정되는 vendor
+집합"** 이 이 구조의 본질이다. CPU arch 분기는 그 원리의 가장 작은 사례일
+뿐, QNN·GPU·S.LSI·MT 모두 같은 규칙을 따른다.
 
 ---
 

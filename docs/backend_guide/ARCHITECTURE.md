@@ -8,6 +8,11 @@ shaped the API.
 It is the contract every new backend must follow, and the rationale
 for the parts of the design that are non-obvious.
 
+> **Companion docs:** [`PLUGGABLE_EN.md`](./PLUGGABLE_EN.md) (English) and
+> [`PLUGGABLE_KO.md`](./PLUGGABLE_KO.md) (Korean) are step-by-step
+> walkthroughs of the same machinery with diagrams, aimed at onboarding.
+> This file is the *contract and rationale*; those are the *tutorial*.
+
 ---
 
 ## 1. The dispatch chain
@@ -25,7 +30,24 @@ Reading top-to-bottom:
 * **Engine** holds a registry of `Context` objects, keyed by name
   (`"cpu"`, `"gpu"`, `"qnn"`). At process startup it calls
   `ensureComputeOps()` once to bind the global CPU `g_compute_ops`,
-  then registers each available `Context`.
+  then registers each available `Context`. Registration has two
+  entry points, both named `Engine::registerContext`:
+  - **built-in:** `registerContext(name, ctx*)` — used for CPU
+    (`AppContext`) and, when `enable-opencl`, GPU (`ClContext`).
+  - **plugin `.so`:** `registerContext(library_path, base_path)`
+    — `dlopen`s the shared object, resolves the
+    `extern "C" ml_train_context_pluggable` symbol
+    (a `ContextPluggable{createfunc, destroyfunc}` defined in
+    `context.h`), calls `createfunc()`, and registers the returned
+    Context under its `getName()`. QNN ships this way:
+    `engine.cpp` does `registerContext("libqnn_context.so", "")`
+    under `enable-npu`, decoupling the QNN SDK from the core build.
+
+  Which Contexts exist at all is therefore a **build-time** decision
+  (meson options: `enable-opencl`, `enable-npu`, and the per-arch
+  CPU split below — and the same gate is how future S.LSI / MediaTek
+  / other vendor backends will be added). The call site never
+  branches on vendor; only the registered set differs per build.
 
 * **Context** is the user-facing entry point for a vendor backend.
   Layers, optimizers, and tensor allocations all flow through a
@@ -49,6 +71,21 @@ Reading top-to-bottom:
 * **Kernels** are the actual code that runs (NEON intrinsics,
   OpenCL kernel launches, QNN graph submissions, etc.). They live
   inside the ComputeOps subclass methods.
+
+  **Per-arch CPU split (build-time).** The CPU backend is *not* one
+  body of code. `nntrainer/tensor/cpu_backend/` ships three sibling
+  implementations — `arm/` (NEON), `x86/` (AVX2 + ggml/BLAS),
+  `fallback/` (scalar) — and `cpu_backend/meson.build` picks exactly
+  one via `host_machine.cpu_family()`: `arm`/`aarch64`/android →
+  `arm/`, `x86_64`/`x86` → `x86/`, else `fallback/`. Each provides
+  its own `init_backend()` that ends with
+  `g_compute_ops = get_cpu_ops()` (the single `CpuComputeOps` in
+  `cpu_ops_table.cpp`). So at the *call site* there is still one
+  `g_compute_ops`; what changed is **which arch's kernels were
+  compiled into it**. This is the same build-time-selection
+  principle as vendor Context gating above — CPU arch, GPU, NPU and
+  future vendors are all chosen when the binary is built/loaded, not
+  branched at the call site.
 
 ---
 
@@ -256,17 +293,34 @@ Suppose you are adding `XyzBackend` (some new accelerator).
    `enable-xyz` option so default builds are unaffected.
 
 2. **ContextData subclass** (only if the backend needs per-context
-   state). E.g.:
+   state). Note `getType()` returns `const char *`, not
+   `std::string` (see `context_data.h`):
    ```cpp
    class XyzBackendVar : public ContextData {
    public:
-     std::string getType() const override { return "xyz"; }
+     const char *getType() const override { return "xyz"; }
      XyzSession *session = nullptr;
      XyzKernelCache cache;
    };
    ```
 
-3. **ComputeOps subclass.** Override the ops you support; leave
+3. **MemAllocator subclass** (only if the backend needs
+   device-visible memory — skip for plain host memory). Mirror
+   `ClSVMAllocator` (`cl_svm_allocator.h`, OpenCL SVM) or
+   `QNNRpcManager` (`qnn/jni/qnn_rpc_manager.h`, DSP RPC):
+   ```cpp
+   class XyzAllocator : public MemAllocator {
+     void alloc(void **p, size_t n, size_t a) override; // device alloc
+     void free(void *p) override;
+     std::string getName() override { return "xyz"; }
+   };
+   ```
+   Attach it via `getContextData()->setMemAllocator(...)` in the
+   Context's `initialize()`. `Engine` copies it into its
+   `allocator` map at registration so the memory pool uses the
+   right allocator per vendor.
+
+4. **ComputeOps subclass.** Override the ops you support; leave
    the rest to default-throw. For accelerator-only batched ops,
    override the `supports_*()` predicate to return `true`.
    ```cpp
@@ -283,18 +337,41 @@ Suppose you are adding `XyzBackend` (some new accelerator).
    };
    ```
 
-4. **Context subclass.** Mirror `ClContext` / `QNNContext`. Its
+5. **Context subclass.** Mirror `ClContext` / `QNNContext`. Pass
+   the `XyzBackendVar` to the `Context` base ctor. Its
    `initialize()` should:
    * call `ensureComputeOps()` (CPU fallback for unsupported ops)
    * construct an `XyzComputeOps` and `setComputeOps(...)` it on
      this context's `ContextData`
+   * `setMemAllocator(...)` the `XyzAllocator` (step 3)
    * register any vendor-specific Layer factories
+   * `getName()` must return a non-empty `"xyz"` — the empty
+     string is rejected at registration.
 
-5. **Engine wiring.** Under `#if ENABLE_XYZ == 1`, do
-   `registerContext("xyz", &XyzContext::Global())` in
-   `Engine::add_default_object`.
+6. **Engine wiring.** Two options:
+   * **built-in:** under `#if ENABLE_XYZ == 1`, add
+     `registerContext("xyz", &XyzContext::Global())` to
+     `Engine::add_default_object` (this is how CPU/GPU are wired).
+   * **plugin `.so`** (decouples a proprietary SDK, like QNN):
+     export the C entry point, build `libxyz_context.so`, and let
+     `Engine::add_default_object` load it by path:
+     ```cpp
+     // xyz_context.cpp, compiled with -DPLUGGABLE
+     nntrainer::Context *create_xyz_context() {
+       auto *c = new nntrainer::XyzContext(); c->Global(); return c;
+     }
+     void destory_xyz_context(nntrainer::Context *c) { delete c; }
+     extern "C" {
+     nntrainer::ContextPluggable ml_train_context_pluggable{
+       create_xyz_context, destory_xyz_context};
+     }
+     ```
+     ```cpp
+     // engine.cpp, under #if ENABLE_XYZ == 1
+     registerContext("libxyz_context.so", "");
+     ```
 
-6. **Tests.** Add a unit test that:
+7. **Tests.** Add a unit test that:
    * constructs a `MockXyzComputeOps` (or an
      instrumented real one) attached via ContextData
    * exercises the dispatch path end-to-end
