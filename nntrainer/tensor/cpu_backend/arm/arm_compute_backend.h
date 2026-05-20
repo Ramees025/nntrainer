@@ -1435,6 +1435,16 @@ void dequantize_row_q8_0(const void *x_raw, T *y, int64_t k);
 void rms_norm_wrt_width_fp32_intrinsic(const float *__restrict X,
                                        float *__restrict Y, size_t H, size_t W,
                                        float epsilon);
+
+
+void causal_depthwise_conv1d_k3(const float *input, const float *packed_weight,
+                                const float *bias, float *output,
+                                unsigned int B, unsigned int H, unsigned int W);
+
+void causal_depthwise_conv1d_k3_decode(const float *x_cur,
+                                       const float *packed_weight, float *state,
+                                       float *y_cur, unsigned int W);
+        
 #ifdef ENABLE_FP16
 /**
  * @brief rms normalization computation w.r.t. width in H*W matrix input

@@ -125,7 +125,7 @@ void Transformer::setupParameters(json &cfg, json &generation_cfg,
                     : 1;
   EMBEDDING_DTYPE = nntr_cfg["embedding_dtype"];
   FC_LAYER_DTYPE = nntr_cfg["fc_layer_dtype"];
-
+  
   if (cfg.contains("is_causal")) {
     IS_CAUSAL = cfg["is_causal"].get<bool>();
   } else if (cfg.contains("use_bidirectional_attention")) {
@@ -138,10 +138,11 @@ void Transformer::setupParameters(json &cfg, json &generation_cfg,
              cfg["architectures"][0].get<std::string>() == "Qwen2Model") {
     IS_CAUSAL = false;
   }
-
+  
   NUM_VOCAB = cfg["vocab_size"];
   DIM = cfg["hidden_size"];
-  INTERMEDIATE_SIZE = cfg["intermediate_size"];
+  INTERMEDIATE_SIZE = cfg.contains("intermediate_size")
+                      ? cfg["intermediate_size"].get<int>() : 0;
   NUM_LAYERS = cfg["num_hidden_layers"];
   NUM_HEADS = cfg["num_attention_heads"];
   HEAD_DIM = cfg.contains("head_dim")
@@ -150,6 +151,7 @@ void Transformer::setupParameters(json &cfg, json &generation_cfg,
   NUM_KEY_VALUE_HEADS = cfg.contains("num_key_value_heads")
                           ? cfg["num_key_value_heads"].get<int>()
                           : NUM_HEADS;
+  
   SLIDING_WINDOW =
     cfg.contains("sliding_window") && !cfg["sliding_window"].is_null()
       ? cfg["sliding_window"].get<unsigned int>()
@@ -164,10 +166,14 @@ void Transformer::setupParameters(json &cfg, json &generation_cfg,
              cfg["rope_parameters"].contains("rope_theta")) {
     ROPE_THETA = cfg["rope_parameters"]["rope_theta"].get<unsigned int>();
   }
-  TIE_WORD_EMBEDDINGS = cfg["tie_word_embeddings"].get<bool>();
-  NORM_EPS = cfg["rms_norm_eps"];
+  TIE_WORD_EMBEDDINGS = cfg.contains("tie_word_embeddings") 
+                      ? cfg["tie_word_embeddings"].get<bool>() 
+                      : false;
+  NORM_EPS = cfg.contains("rms_norm_eps") 
+            ? cfg["rms_norm_eps"].get<float>() 
+            : 1e-5;
   GQA_SIZE = NUM_HEADS / NUM_KEY_VALUE_HEADS;
-
+  
   return;
 };
 

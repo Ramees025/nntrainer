@@ -1338,6 +1338,14 @@ void transform_int4_osv32_isv2_to_q4_0(size_t N, size_t K,
                                        size_t scale_group_size,
                                        void *dst_q4_0x);
 
+void causal_depthwise_conv1d_k3(const float *input, const float *packed_weight,
+                                const float *bias, float *output,
+                                unsigned int B, unsigned int H, unsigned int W);
+
+void causal_depthwise_conv1d_k3_decode(const float *x_cur,
+                                       const float *packed_weight, float *state,
+                                       float *y_cur, unsigned int W);
+
 } /* namespace nntrainer */
 #endif /* __cplusplus */
 #endif /* __x86_COMPUTE_BACKEND_H__ */

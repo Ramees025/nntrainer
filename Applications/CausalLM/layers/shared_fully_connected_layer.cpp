@@ -207,7 +207,8 @@ void SharedFullyConnectedLayer::read(
 void SharedFullyConnectedLayer::save(
   std::ofstream &file, nntrainer::RunLayerContext &run_context, bool opt_var,
   ml::train::ExecutionMode mode, bool trainable,
-  nntrainer::TensorDim::DataType definedWeightDataType) const {
+  nntrainer::TensorDim::DataType definedWeightDataType,
+  ml::train::ISA target_isa) const {
   if (!shared_mode_) {
     for (unsigned int i = 0; i < run_context.getNumWeights(); ++i) {
       run_context.getWeight(i).save(file);

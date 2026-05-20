@@ -424,7 +424,6 @@ void DebertaAttentionLayer::compute_kcaches(
       const float *in_data = in.getData<float>();
       float *out_data = out.getData<float>();
 
-#pragma omp parallel for schedule(static)
       for (unsigned int head_kv = 0; head_kv < num_cache_head; ++head_kv) {
         if (cache.getDataType() == ml::train::TensorDim::DataType::FP32) {
           compute_kcaches_fp32_reference(
@@ -472,7 +471,6 @@ void DebertaAttentionLayer::compute_kcaches(
       const _FP16 *cache_data = cache.getData<_FP16>();
       _FP16 *out_data = out.getData<_FP16>();
 
-#pragma omp parallel for schedule(static)
       for (unsigned int head_kv = 0; head_kv < num_cache_head; ++head_kv) {
         nntrainer::compute_kcaches(
           in_data, cache_data, out_data, num_rows, num_cache_head, head_dim,
@@ -600,7 +598,6 @@ void DebertaAttentionLayer::compute_fp16vcache_transposed(
       const float *in_data = in.getData<float>();
       float *output_data = output.getData<float>();
 
-#pragma omp parallel for schedule(static)
       for (int head_kv = 0; head_kv < num_cache_head; ++head_kv) {
         if (vcache.getDataType() == ml::train::TensorDim::DataType::FP32) {
           compute_vcache_fp32_transposed_reference(
@@ -641,7 +638,6 @@ void DebertaAttentionLayer::compute_fp16vcache_transposed(
       const _FP16 *vcache_data = vcache.getData<_FP16>();
       _FP16 *output_data = output.getData<_FP16>();
 
-#pragma omp parallel for schedule(static)
       for (int head_kv = 0; head_kv < num_cache_head; ++head_kv) {
         nntrainer::compute_fp16vcache_transposed(
           row_num, in_data, vcache_data, output_data, num_cache_head, gqa_size,
@@ -714,7 +710,6 @@ void DebertaAttentionLayer::add_relative_attn_score(
       rel_idx_local.p2c_idx.resize(static_cast<size_t>(S_q) * S_k);
     }
 
-#pragma omp parallel for schedule(static)
     for (unsigned int q = 0; q < S_q; ++q) {
       for (unsigned int k = 0; k < S_k; ++k) {
         if (c2p) {
@@ -805,7 +800,6 @@ void DebertaAttentionLayer::add_relative_attn_score(
     NNTR_THROW_IF(p2c && key_unpacked_ptr == nullptr, std::invalid_argument)
       << "FP32 p2c path expected FP32, UINT16, or FP16 key cache";
 
-#pragma omp parallel for schedule(static)
     for (unsigned int q_idx = 0; q_idx < S_q; ++q_idx) {
       const size_t qk_row = static_cast<size_t>(q_idx) * S_k;
 
@@ -822,7 +816,6 @@ void DebertaAttentionLayer::add_relative_attn_score(
               rel_key_ptr + static_cast<size_t>(rel_index) * hidden + h_base;
 
             float c2p_dot = 0.0f;
-#pragma omp simd reduction(+ : c2p_dot)
             for (unsigned int d = 0; d < head_dim; ++d) {
               c2p_dot += q_head[d] * rk_head[d];
             }
@@ -837,7 +830,6 @@ void DebertaAttentionLayer::add_relative_attn_score(
             float p2c_dot = 0.0f;
             const float *k_head =
               key_unpacked_ptr + static_cast<size_t>(k_idx) * hidden + h_base;
-#pragma omp simd reduction(+ : p2c_dot)
             for (unsigned int d = 0; d < head_dim; ++d) {
               p2c_dot += k_head[d] * rq_head[d];
             }
@@ -863,7 +855,6 @@ void DebertaAttentionLayer::add_relative_attn_score(
     const _FP16 *rel_key_ptr = c2p ? rel_key.getData<_FP16>() : nullptr;
     const _FP16 *key_fp16_ptr = key_cache.getData<_FP16>();
 
-#pragma omp parallel for schedule(static)
     for (unsigned int q_idx = 0; q_idx < S_q; ++q_idx) {
       const size_t qk_row_base = static_cast<size_t>(q_idx) * S_k;
 
@@ -880,7 +871,6 @@ void DebertaAttentionLayer::add_relative_attn_score(
               rel_key_ptr + static_cast<size_t>(rel_index) * hidden + h_base;
 
             float c2p_dot = 0.0f;
-#pragma omp simd reduction(+ : c2p_dot)
             for (unsigned int d = 0; d < head_dim; ++d) {
               c2p_dot +=
                 static_cast<float>(q_head[d]) * static_cast<float>(rk_head[d]);
@@ -896,7 +886,6 @@ void DebertaAttentionLayer::add_relative_attn_score(
               key_fp16_ptr + static_cast<size_t>(k_idx) * hidden + h_base;
 
             float p2c_dot = 0.0f;
-#pragma omp simd reduction(+ : p2c_dot)
             for (unsigned int d = 0; d < head_dim; ++d) {
               p2c_dot +=
                 static_cast<float>(k_head[d]) * static_cast<float>(rq_head[d]);
