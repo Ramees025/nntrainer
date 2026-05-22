@@ -27,6 +27,7 @@ causallm_custom_multiply_layer_src_abs = [meson.current_source_dir() / 'custom_m
 causallm_per_layer_slice_src_abs = [meson.current_source_dir() / 'per_layer_slice.cpp']
 causallm_scalar_multiply_src_abs = [meson.current_source_dir() / 'scalar_multiply.cpp']
 causallm_logit_softcapping_src_abs = [meson.current_source_dir() / 'logit_softcapping.cpp']
+causallm_vjepa_rope_src_abs = [meson.current_source_dir() / 'vjepa_rope_layer.cpp']
 
 causallm_rms_norm = shared_library(
     'rms_norm_layer', 
@@ -236,7 +237,14 @@ causallm_custom_multiply_layer = shared_library(
     install_dir: application_install_dir
 )
 
-
+causallm_vjepa_rope_layer = shared_library(
+    'vjepa_rope_layer',
+    causallm_vjepa_rope_src_abs,
+    include_directories: causallm_layer_inc,
+    dependencies: [nntrainer_dep, nntrainer_ccapi_dep],
+    install: true,
+    install_dir: application_install_dir
+)
 
 causallm_custom_multiply_dep = declare_dependency(
     link_with: causallm_custom_multiply_layer,
@@ -251,6 +259,22 @@ causallm_scalar_multiply = shared_library(
     install: true,
     install_dir: application_install_dir
 )
+
+causallm_vjepa_rope_layer_dep = declare_dependency(
+    link_with: causallm_vjepa_rope_layer,
+    include_directories: causallm_layer_inc
+)
+
+causallm_vjepa_gelu_src_abs = [meson.current_source_dir() / 'vjepa_gelu_layer.cpp']
+causallm_vjepa_gelu_layer = shared_library(
+    'vjepa_gelu_layer',
+    causallm_vjepa_gelu_src_abs,
+    include_directories: causallm_layer_inc,
+    dependencies: [nntrainer_dep, nntrainer_ccapi_dep],
+    install: true,
+    install_dir: application_install_dir
+)
+
 causallm_scalar_multiply_dep = declare_dependency(
     link_with: causallm_scalar_multiply,
     include_directories: causallm_layer_inc
@@ -264,7 +288,28 @@ causallm_logit_softcapping = shared_library(
     install: true,
     install_dir: application_install_dir
 )
+
+causallm_vjepa_gelu_layer_dep = declare_dependency(
+    link_with: causallm_vjepa_gelu_layer,
+    include_directories: causallm_layer_inc
+)
+
+causallm_vjepa_ln_src_abs = [meson.current_source_dir() / 'vjepa_layernorm_layer.cpp']
+causallm_vjepa_layernorm_layer = shared_library(
+    'vjepa_layernorm_layer',
+    causallm_vjepa_ln_src_abs,
+    include_directories: causallm_layer_inc,
+    dependencies: [nntrainer_dep, nntrainer_ccapi_dep],
+    install: true,
+    install_dir: application_install_dir
+)
+
 causallm_logit_softcapping_dep = declare_dependency(
     link_with: causallm_logit_softcapping,
+    include_directories: causallm_layer_inc
+)
+
+causallm_vjepa_layernorm_layer_dep = declare_dependency(
+    link_with: causallm_vjepa_layernorm_layer,
     include_directories: causallm_layer_inc
 )
