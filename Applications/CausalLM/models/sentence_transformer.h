@@ -107,14 +107,36 @@ protected:
    */
   void registerCustomLayers() override;
 
-private:
+protected:
   /**
    * @brief Allocate and bind external KV cache placeholders for attention
    * layers.
    */
-  void allocateAndBindKVCache();
+  virtual void allocateAndBindKVCache();
+
+  /**
+   * @brief Return the total number of (attention, KV-cache) slots in the
+   *        compiled graph. Default = NUM_LAYERS. Models that unroll a loop
+   *        (e.g. Ouro Universal Transformer) override this to return
+   *        TOTAL_UT_STEPS * NUM_LAYERS so per-(step,layer) caches are bound.
+   */
+  virtual unsigned int kvCacheSlotCount() const {
+    return static_cast<unsigned int>(NUM_LAYERS);
+  }
+
+  /**
+   * @brief Map a flat cache slot index to the attention node name in the
+   *        compiled graph (used for ":input3"/":input4" lookup).
+   *        Default: "layer<slot>_attention". Loop-unrolled models override
+   *        to insert a UT-step suffix.
+   */
+  virtual std::string attentionNodeName(unsigned int slot) const {
+    return "layer" + std::to_string(slot) + "_attention";
+  }
 
   KVCacheManager kv_cache;
+
+private:
 
   /**
    * @brief Module metadata list (from modules.json)

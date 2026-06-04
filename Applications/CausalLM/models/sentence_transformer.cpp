@@ -214,21 +214,23 @@ Tensor SentenceTransformer::addModule(const std::string &type, int idx,
 }
 
 void SentenceTransformer::allocateAndBindKVCache() {
+  const unsigned int total_slots = kvCacheSlotCount();
+
   if (!kv_cache.isAllocated()) {
 #ifdef ENABLE_FP16
     const auto cache_dtype = ml::train::TensorDim::DataType::FP16;
 #else
     const auto cache_dtype = ml::train::TensorDim::DataType::UINT16;
 #endif
-    kv_cache.allocate(static_cast<unsigned int>(NUM_LAYERS), BATCH_SIZE,
+    kv_cache.allocate(total_slots, BATCH_SIZE,
                       static_cast<unsigned int>(MAX_SEQ_LEN),
                       static_cast<unsigned int>(NUM_KEY_VALUE_HEADS),
                       static_cast<unsigned int>(HEAD_DIM), cache_dtype);
   }
 
-  for (int i = 0; i < NUM_LAYERS; ++i) {
-    auto &kc = kv_cache.getKeyCache(i);
-    auto &vc = kv_cache.getValueCache(i);
+  for (unsigned int s = 0; s < total_slots; ++s) {
+    auto &kc = kv_cache.getKeyCache(s);
+    auto &vc = kv_cache.getValueCache(s);
 
     auto find_cache_placeholder = [this](const std::string &base_name) {
       for (const auto &suffix : {":0", ":input0", ":out0", ""}) {
@@ -239,25 +241,24 @@ void SentenceTransformer::allocateAndBindKVCache() {
       return static_cast<nntrainer::Tensor *>(nullptr);
     };
 
-    auto *kp =
-      model->getTensor("layer" + std::to_string(i) + "_attention:input3");
-    auto *vp =
-      model->getTensor("layer" + std::to_string(i) + "_attention:input4");
+    const std::string attn_name = attentionNodeName(s);
+    auto *kp = model->getTensor(attn_name + ":input3");
+    auto *vp = model->getTensor(attn_name + ":input4");
     if (kp == nullptr)
-      kp = find_cache_placeholder("cache_k_l" + std::to_string(i));
+      kp = find_cache_placeholder("cache_k_l" + std::to_string(s));
     if (vp == nullptr)
-      vp = find_cache_placeholder("cache_v_l" + std::to_string(i));
+      vp = find_cache_placeholder("cache_v_l" + std::to_string(s));
 
     if (kp == nullptr || vp == nullptr) {
       throw std::runtime_error(
-        "SentenceTransformer: KV cache placeholder not found for layer " +
-        std::to_string(i));
+        "SentenceTransformer: KV cache placeholder not found for slot " +
+        std::to_string(s) + " (attn=" + attn_name + ")");
     }
     if (kp->getDataType() != kc.getDataType() ||
         vp->getDataType() != vc.getDataType()) {
       throw std::runtime_error(
-        "SentenceTransformer: KV cache placeholder dtype mismatch for layer " +
-        std::to_string(i));
+        "SentenceTransformer: KV cache placeholder dtype mismatch for slot " +
+        std::to_string(s));
     }
 
     kp->setData(kc.getMemoryData(), kc.getOffset(), false);
@@ -335,10 +336,11 @@ std::vector<float *> SentenceTransformer::encode(const WSTR prompt,
   std::vector<float *> label; // Empty label for inference
 
   allocateAndBindKVCache();
+  const unsigned int total_slots = kvCacheSlotCount();
   auto build_inference_inputs = [&]() {
     std::vector<std::pair<std::string, float *>> cache_inputs;
-    cache_inputs.reserve(static_cast<size_t>(NUM_LAYERS) * 2);
-    for (int i = 0; i < NUM_LAYERS; ++i) {
+    cache_inputs.reserve(static_cast<size_t>(total_slots) * 2);
+    for (unsigned int i = 0; i < total_slots; ++i) {
       cache_inputs.emplace_back(
         "cache_k_l" + std::to_string(i),
         reinterpret_cast<float *>(kv_cache.getKeyCache(i).getData()));
@@ -364,8 +366,16 @@ std::vector<float *> SentenceTransformer::encode(const WSTR prompt,
   // start: 0, end: input_len (process all tokens at once)
   // This performs a single forward pass for the entire prompt sequence to get
   // embeddings.
+  auto start_prefill = std::chrono::high_resolution_clock::now();
   std::vector<float *> output = model->incremental_inference(
     BATCH_SIZE, input, label, input_len, 0, input_len, false);
+  auto finish_prefill = std::chrono::high_resolution_clock::now();
+
+  auto prefill_duration =
+    std::chrono::duration_cast<std::chrono::milliseconds>(finish_prefill -
+                                                          start_prefill);
+  performance_metrics.prefill_tokens = input_len;
+  performance_metrics.prefill_duration_ms = prefill_duration.count();
 
   return output;
 }
