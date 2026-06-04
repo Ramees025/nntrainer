@@ -137,7 +137,6 @@ protected:
   KVCacheManager kv_cache;
 
 private:
-
   /**
    * @brief Module metadata list (from modules.json)
    */

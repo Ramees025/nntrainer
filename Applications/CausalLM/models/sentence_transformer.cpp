@@ -399,9 +399,8 @@ std::vector<float *> SentenceTransformer::encode(const WSTR prompt,
     BATCH_SIZE, input, label, input_len, 0, input_len, false);
   auto finish_prefill = std::chrono::high_resolution_clock::now();
 
-  auto prefill_duration =
-    std::chrono::duration_cast<std::chrono::milliseconds>(finish_prefill -
-                                                          start_prefill);
+  auto prefill_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+    finish_prefill - start_prefill);
   performance_metrics.prefill_tokens = input_len;
   performance_metrics.prefill_duration_ms = prefill_duration.count();
 
