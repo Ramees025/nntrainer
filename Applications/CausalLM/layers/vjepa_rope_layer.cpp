@@ -15,6 +15,7 @@
 
 #include <nntrainer_error.h>
 
+#include "vjepa_debug.h"
 #include "vjepa_rope_layer.h"
 
 namespace causallm {
@@ -130,6 +131,10 @@ void VjepaRopeLayer::forwarding(nntrainer::RunLayerContext &context,
         "[vjepa_rope] only FP32 is supported in forwarding");
     }
   }
+  if (in.getDataType() == ml::train::TensorDim::DataType::FP32) {
+    debug::print_activation_stats("vjepa_rope", out.getData<float>(),
+                                 out.size());
+  }
 }
 
 void VjepaRopeLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
@@ -158,6 +163,16 @@ void VjepaRopeLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
       throw std::invalid_argument("[vjepa_rope] unsupported data type");
     }
   }
+  if (in.getDataType() == ml::train::TensorDim::DataType::FP32) {
+    debug::print_activation_stats("vjepa_rope", out.getData<float>(),
+                                 out.size());
+  }
+#ifdef ENABLE_FP16
+  else if (in.getDataType() == ml::train::TensorDim::DataType::FP16) {
+    debug::print_activation_stats("vjepa_rope", out.getData<_FP16>(),
+                                 out.size());
+  }
+#endif
 }
 
 template <typename T>

@@ -10,6 +10,7 @@
  */
 
 #include "vjepa_layernorm_layer.h"
+#include "vjepa_debug.h"
 
 #include <cmath>
 #include <nntrainer_error.h>
@@ -74,6 +75,20 @@ static void layernorm_parallel(const T *X, T *Y, const float *gamma,
       }
       var *= invW;
       const float inv = 1.0f / std::sqrt(var + eps);
+      // Debug: print variance and inv for first 5 rows to detect overflow
+      if (causallm::debug::is_enabled() && r < 5) {
+        float norm_max = 0.0f;
+        for (unsigned int j = 0; j < W; ++j) {
+          float nv = std::abs((static_cast<float>(x[j]) - mean) * inv);
+          if (nv > norm_max) norm_max = nv;
+        }
+        std::cout << "[VJEPA_DEBUG] layernorm row[" << r
+                  << "]: mean=" << mean
+                  << ", var=" << var
+                  << ", inv(1/sqrt(var+eps))=" << inv
+                  << ", max|(x-mean)*inv|=" << norm_max
+                  << std::endl;
+      }
       for (unsigned int j = 0; j < W; ++j)
         y[j] = static_cast<T>((static_cast<float>(x[j]) - mean) * inv *
                                 gamma[j] +
@@ -115,6 +130,16 @@ void VjepaLayerNormLayer::forwarding(nntrainer::RunLayerContext &context,
   } else {
     throw std::invalid_argument("[vjepa_layernorm] unsupported data type");
   }
+  if (in.getDataType() == ml::train::TensorDim::DataType::FP32) {
+    debug::print_activation_stats("vjepa_layernorm", out.getData<float>(),
+                                 out.size());
+  }
+#ifdef ENABLE_FP16
+  else if (in.getDataType() == ml::train::TensorDim::DataType::FP16) {
+    debug::print_activation_stats("vjepa_layernorm", out.getData<_FP16>(),
+                                 out.size());
+  }
+#endif
 }
 
 void VjepaLayerNormLayer::incremental_forwarding(
@@ -135,6 +160,21 @@ void VjepaLayerNormLayer::incremental_forwarding(
   const bool is_fp16 = in.getDataType() == ml::train::TensorDim::DataType::FP16;
   if (!is_fp16 && in.getDataType() != ml::train::TensorDim::DataType::FP32)
     throw std::invalid_argument("[vjepa_layernorm] unsupported data type");
+  // Debug: print input stats before layernorm
+  if (!is_fp16) {
+    debug::print_activation_stats("vjepa_layernorm INPUT", in.getData<float>(),
+                                 in.size());
+    debug::print_activation_stats("vjepa_layernorm gamma", g, W);
+    debug::print_activation_stats("vjepa_layernorm beta", bt, W);
+  }
+#ifdef ENABLE_FP16
+  else {
+    debug::print_activation_stats("vjepa_layernorm INPUT", in.getData<_FP16>(),
+                                 in.size());
+    debug::print_activation_stats("vjepa_layernorm gamma", g, W);
+    debug::print_activation_stats("vjepa_layernorm beta", bt, W);
+  }
+#endif
   for (unsigned int b = 0; b < dim.batch(); ++b) {
     for (unsigned int c = 0; c < dim.channel(); ++c) {
       const size_t off = (size_t)b * feature_len +
@@ -154,6 +194,16 @@ void VjepaLayerNormLayer::incremental_forwarding(
       }
     }
   }
+  if (!is_fp16) {
+    debug::print_activation_stats("vjepa_layernorm", out.getData<float>(),
+                                 out.size());
+  }
+#ifdef ENABLE_FP16
+  else {
+    debug::print_activation_stats("vjepa_layernorm", out.getData<_FP16>(),
+                                 out.size());
+  }
+#endif
 }
 
 void VjepaLayerNormLayer::calcDerivative(nntrainer::RunLayerContext &context) {

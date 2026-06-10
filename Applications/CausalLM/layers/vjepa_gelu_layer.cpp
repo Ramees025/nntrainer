@@ -10,6 +10,7 @@
  */
 
 #include "vjepa_gelu_layer.h"
+#include "vjepa_debug.h"
 
 #include <cmath>
 #include <cpu_backend.h>
@@ -86,6 +87,16 @@ void VjepaGeluLayer::forwarding(nntrainer::RunLayerContext &context,
   } else {
     throw std::invalid_argument("[vjepa_gelu] unsupported data type");
   }
+  if (in.getDataType() == ml::train::TensorDim::DataType::FP32) {
+    debug::print_activation_stats("vjepa_gelu", out.getData<float>(),
+                                 out.size());
+  }
+#ifdef ENABLE_FP16
+  else if (in.getDataType() == ml::train::TensorDim::DataType::FP16) {
+    debug::print_activation_stats("vjepa_gelu", out.getData<_FP16>(),
+                                 out.size());
+  }
+#endif
 }
 
 void VjepaGeluLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
@@ -117,6 +128,16 @@ void VjepaGeluLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
 #endif
     }
   }
+  if (!is_fp16) {
+    debug::print_activation_stats("vjepa_gelu", out.getData<float>(),
+                                 out.size());
+  }
+#ifdef ENABLE_FP16
+  else {
+    debug::print_activation_stats("vjepa_gelu", out.getData<_FP16>(),
+                                 out.size());
+  }
+#endif
 }
 
 void VjepaGeluLayer::calcDerivative(nntrainer::RunLayerContext &context) {

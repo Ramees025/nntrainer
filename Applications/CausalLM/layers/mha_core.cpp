@@ -26,11 +26,16 @@ static std::mutex rope_init_mtx;
 #include <layer_context.h>
 #include <mha_core.h>
 #include <nntrainer_error.h>
+#include "vjepa_debug.h"
 #include <node_exporter.h>
 #include <thread_manager.h>
 #include <util_func.h>
 
 #include <cstdint>
+
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+#endif
 
 inline float convert_scalar(uint16_t h) {
   return nntrainer::compute_fp16_to_fp32(h);
@@ -419,6 +424,19 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
   }
 
   cache_index += step_size;
+  {
+    nntrainer::Tensor &output = context.getOutput(INOUT_INDEX::OUTPUT);
+    if (output.getDataType() == ml::train::TensorDim::DataType::FP32) {
+      debug::print_activation_stats("mha_core", output.getData<float>(),
+                                   output.size());
+    }
+#ifdef ENABLE_FP16
+    else if (output.getDataType() == ml::train::TensorDim::DataType::FP16) {
+      debug::print_activation_stats("mha_core", output.getData<_FP16>(),
+                                   output.size());
+    }
+#endif
+  }
 }
 
 /**
@@ -584,6 +602,18 @@ void MHACoreLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
 
   // increase cache size
   cache_index += step_size;
+  {
+    if (output.getDataType() == ml::train::TensorDim::DataType::FP32) {
+      debug::print_activation_stats("mha_core", output.getData<float>(),
+                                   output.size());
+    }
+#ifdef ENABLE_FP16
+    else if (output.getDataType() == ml::train::TensorDim::DataType::FP16) {
+      debug::print_activation_stats("mha_core", output.getData<_FP16>(),
+                                   output.size());
+    }
+#endif
+  }
 }
 
 /**
@@ -906,7 +936,7 @@ mha_convert_fp16bits_to_fp32(unsigned int N, const uint16_t *src, float *dst) {
 //                       B is N rows x K cols, row-major, ldb columns
 //   TransB=false (AV): C[m, n] = alpha * sum_k A[m,k] * fp16(B[k,n])
 //                       B is K rows x N cols, row-major, ldb columns
-static inline void mha_hsgemm_avx2(unsigned int M, unsigned int N,
+static void mha_hsgemm_avx2(unsigned int M, unsigned int N,
                                    unsigned int K, float alpha, const float *A,
                                    unsigned int lda, const uint16_t *B,
                                    unsigned int ldb, bool TransB, float *C,

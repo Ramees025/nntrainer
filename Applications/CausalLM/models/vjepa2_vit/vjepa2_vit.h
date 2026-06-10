@@ -64,6 +64,22 @@ public:
    */
   Tensor createMlp(const int layer_id, Tensor input);
 
+  /**
+   * @brief Run the encoder on video loaded from a directory of image frames.
+   *
+   * Loads frames from @p video_dir using video_util, patches them, and runs
+   * inference. If @p video_dir is empty, falls back to loading a raw binary
+   * tensor from @p video_bin_path.
+   *
+   * @param video_dir     Path to directory of image frames (JPEG/PNG/BMP).
+   * @param video_bin_path Path to a raw float32 [C,T,H,W] binary file (used
+   *                       if video_dir is empty).
+   * @param normalize     Whether to normalize pixel values (default: true).
+   */
+  void run_with_video(const std::string &video_dir,
+                      const std::string &video_bin_path = "",
+                      bool normalize = true);
+
 protected:
   /**
    * @brief Construct the symbolic ViT inference graph.
