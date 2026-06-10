@@ -65,7 +65,6 @@ public:
   Tensor createMlp(const int layer_id, Tensor input);
 
   /**
-<<<<<<< HEAD
    * @brief Run the encoder on video loaded from a directory of image frames.
    *
    * Loads frames from @p video_dir using video_util, patches them, and runs
@@ -80,8 +79,8 @@ public:
   void run_with_video(const std::string &video_dir,
                       const std::string &video_bin_path = "",
                       bool normalize = true);
-
-=======
+  
+  /**
    * @brief Run the encoder on multiple video frames.
    *
    * Each element of @p images is a single frame in [C, H, W] layout
@@ -99,7 +98,6 @@ public:
                                unsigned int original_height,
                                unsigned int original_width,
                                bool log_output = true);
->>>>>>> e1dc405 ([CausalLM] Add vjepa project modules to merge the video frames)
 protected:
   /**
    * @brief Construct the symbolic ViT inference graph.

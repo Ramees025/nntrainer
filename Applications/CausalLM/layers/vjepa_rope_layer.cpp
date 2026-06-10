@@ -169,11 +169,7 @@ void VjepaRopeLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
   }
 #ifdef ENABLE_FP16
   else if (in.getDataType() == ml::train::TensorDim::DataType::FP16) {
-<<<<<<< Updated upstream
-    debug::print_activation_stats("vjepa_rope", out.getData<_FP16>(),
-=======
     debug::print_activation_stats_fp16("vjepa_rope", out.getData<_FP16>(),
->>>>>>> Stashed changes
                                  out.size());
   }
 #endif
