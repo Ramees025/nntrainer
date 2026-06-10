@@ -432,7 +432,11 @@ void MHACoreLayer::forwarding(nntrainer::RunLayerContext &context,
     }
 #ifdef ENABLE_FP16
     else if (output.getDataType() == ml::train::TensorDim::DataType::FP16) {
+<<<<<<< Updated upstream
       debug::print_activation_stats("mha_core", output.getData<_FP16>(),
+=======
+      debug::print_activation_stats_fp16("mha_core", output.getData<_FP16>(),
+>>>>>>> Stashed changes
                                    output.size());
     }
 #endif
@@ -609,7 +613,11 @@ void MHACoreLayer::incremental_forwarding(nntrainer::RunLayerContext &context,
     }
 #ifdef ENABLE_FP16
     else if (output.getDataType() == ml::train::TensorDim::DataType::FP16) {
+<<<<<<< Updated upstream
       debug::print_activation_stats("mha_core", output.getData<_FP16>(),
+=======
+      debug::print_activation_stats_fp16("mha_core", output.getData<_FP16>(),
+>>>>>>> Stashed changes
                                    output.size());
     }
 #endif

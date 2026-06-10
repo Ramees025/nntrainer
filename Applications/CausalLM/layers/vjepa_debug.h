@@ -18,6 +18,10 @@
 #include <iostream>
 #include <limits>
 #include <string>
+<<<<<<< Updated upstream
+=======
+#include <vector>
+>>>>>>> Stashed changes
 
 namespace causallm {
 namespace debug {
@@ -71,6 +75,7 @@ inline void print_activation_stats(const std::string &layer_name,
   std::cout << std::endl;
 }
 
+<<<<<<< Updated upstream
 #ifdef ENABLE_FP16
 /** @brief Print activation stats for FP16. */
 inline void print_activation_stats(const std::string &layer_name,
@@ -110,6 +115,25 @@ inline void print_activation_stats(const std::string &layer_name,
   std::cout << std::endl;
 }
 #endif
+=======
+/**
+ * @brief Print activation stats from FP16 data by converting to FP32 first.
+ *
+ * This avoids depending on _FP16 type definition in this header.
+ * The caller must include the appropriate FP16 headers before using this.
+ */
+template <typename T>
+inline void print_activation_stats_fp16(const std::string &layer_name,
+                                        const T *data, size_t count) {
+  if (!is_enabled() || count == 0)
+    return;
+  // Convert to float first
+  std::vector<float> fdata(count);
+  for (size_t i = 0; i < count; ++i)
+    fdata[i] = static_cast<float>(data[i]);
+  print_activation_stats(layer_name, fdata.data(), count);
+}
+>>>>>>> Stashed changes
 
 } // namespace debug
 } // namespace causallm

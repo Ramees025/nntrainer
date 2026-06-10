@@ -136,7 +136,11 @@ void VjepaLayerNormLayer::forwarding(nntrainer::RunLayerContext &context,
   }
 #ifdef ENABLE_FP16
   else if (in.getDataType() == ml::train::TensorDim::DataType::FP16) {
+<<<<<<< Updated upstream
     debug::print_activation_stats("vjepa_layernorm", out.getData<_FP16>(),
+=======
+    debug::print_activation_stats_fp16("vjepa_layernorm", out.getData<_FP16>(),
+>>>>>>> Stashed changes
                                  out.size());
   }
 #endif
@@ -169,7 +173,11 @@ void VjepaLayerNormLayer::incremental_forwarding(
   }
 #ifdef ENABLE_FP16
   else {
+<<<<<<< Updated upstream
     debug::print_activation_stats("vjepa_layernorm INPUT", in.getData<_FP16>(),
+=======
+    debug::print_activation_stats_fp16("vjepa_layernorm INPUT", in.getData<_FP16>(),
+>>>>>>> Stashed changes
                                  in.size());
     debug::print_activation_stats("vjepa_layernorm gamma", g, W);
     debug::print_activation_stats("vjepa_layernorm beta", bt, W);
@@ -200,7 +208,11 @@ void VjepaLayerNormLayer::incremental_forwarding(
   }
 #ifdef ENABLE_FP16
   else {
+<<<<<<< Updated upstream
     debug::print_activation_stats("vjepa_layernorm", out.getData<_FP16>(),
+=======
+    debug::print_activation_stats_fp16("vjepa_layernorm", out.getData<_FP16>(),
+>>>>>>> Stashed changes
                                  out.size());
   }
 #endif
