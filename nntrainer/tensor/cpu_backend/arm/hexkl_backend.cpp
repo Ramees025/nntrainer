@@ -42,6 +42,7 @@
 #undef restrict
 
 #include <android/log.h>
+#include <arm_neon.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -119,6 +120,64 @@ static inline int64_t now_us() {
   return (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000LL;
 }
 
+// ---------------------------------------------------------------------------
+// NEON-vectorized FP32→FP16 conversion with optional transpose.
+//
+// For TransB=true  (B is [N×K] row-major, stride ldb):
+//   dst[n*K + k] = (f16) B[n*ldb + k]   — sequential reads, no reorder.
+//
+// For TransB=false (B is [K×N] row-major, stride ldb):
+//   dst[n*K + k] = (f16) B[k*ldb + n]   — transpose required.
+//   Uses blocked traversal (BK×BN tiles) so B reads stay sequential
+//   within each tile; NEON converts 4 FP32 → 4 FP16 per cycle.
+// ---------------------------------------------------------------------------
+static void f32_to_f16_convert(
+    _Float16 *__restrict__ dst,
+    const float *__restrict__ B,
+    unsigned N, unsigned K, unsigned ldb, bool TransB)
+{
+  if (TransB) {
+    // B is [N×K] — straight copy row by row, NEON 8-wide
+    for (unsigned n = 0; n < N; ++n) {
+      const float *brow = B + (size_t)n * ldb;
+      _Float16    *drow = dst + (size_t)n * K;
+      unsigned k = 0;
+      for (; k + 8 <= K; k += 8) {
+        float32x4_t v0 = vld1q_f32(brow + k);
+        float32x4_t v1 = vld1q_f32(brow + k + 4);
+        vst1q_f16((__fp16 *)(drow + k),
+                  vcombine_f16(vcvt_f16_f32(v0), vcvt_f16_f32(v1)));
+      }
+      for (; k < K; ++k) drow[k] = (_Float16)brow[k];
+    }
+  } else {
+    // B is [K×N] — blocked transpose + NEON 4-wide conversion.
+    // Outer tile over k keeps B reads sequential; inner tile over n
+    // keeps the dst scatter writes L1-local.
+    const unsigned BK = 4, BN = 32;
+    for (unsigned k0 = 0; k0 < K; k0 += BK) {
+      unsigned k_end = k0 + BK < K ? k0 + BK : K;
+      for (unsigned n0 = 0; n0 < N; n0 += BN) {
+        unsigned n_end = n0 + BN < N ? n0 + BN : N;
+        for (unsigned k = k0; k < k_end; ++k) {
+          const float *brow = B + (size_t)k * ldb + n0;
+          unsigned n = n0;
+          for (; n + 4 <= n_end; n += 4) {
+            float32x4_t v = vld1q_f32(brow + (n - n0));
+            __fp16 tmp[4]; vst1_f16(tmp, vcvt_f16_f32(v));
+            dst[(size_t)n     * K + k] = (_Float16)tmp[0];
+            dst[(size_t)(n+1) * K + k] = (_Float16)tmp[1];
+            dst[(size_t)(n+2) * K + k] = (_Float16)tmp[2];
+            dst[(size_t)(n+3) * K + k] = (_Float16)tmp[3];
+          }
+          for (; n < n_end; ++n)
+            dst[(size_t)n * K + k] = (_Float16)brow[n - n0];
+        }
+      }
+    }
+  }
+}
+
 // Accumulated timing (reset each forward pass by tracking call count).
 static int64_t g_t_cache_us = 0, g_t_memcpy_us = 0,
                g_t_lock_us = 0, g_t_dsp_us = 0, g_t_unlock_us = 0;
@@ -163,6 +222,37 @@ void finalize() {
 }
 
 // ---------------------------------------------------------------------------
+// preload_weight_f32 / is_weight_cached — warm the WH cache without dispatch.
+// Call this for each FC weight during model loading or decode steps so that
+// the first real prefill (M > 1) hits the cache and skips the build cost.
+// ---------------------------------------------------------------------------
+
+bool is_weight_cached(bool TransB, unsigned N, unsigned K, const float *B) {
+  if (!g_initialized) return false;
+  WeightKey key{reinterpret_cast<uintptr_t>(B), N, K, TransB};
+  std::lock_guard<std::mutex> cl(g_cache_mutex);
+  return g_wh_cache.count(key) != 0;
+}
+
+void preload_weight_f32(bool TransB, unsigned N, unsigned K,
+                        const float *B, unsigned ldb) {
+  if (!g_initialized) return;
+  WeightKey key{reinterpret_cast<uintptr_t>(B), N, K, TransB};
+  {
+    std::lock_guard<std::mutex> cl(g_cache_mutex);
+    if (g_wh_cache.count(key)) return;  // already cached
+  }
+  const size_t w_bytes = (size_t)N * K * sizeof(_Float16);
+  _Float16 *wh_buf = static_cast<_Float16 *>(malloc(w_bytes));
+  if (!wh_buf) return;
+  f32_to_f16_convert(wh_buf, B, N, K, ldb, TransB);
+  if (sdkl_cpu_rm_to_wh_f16_inplace(N, K, wh_buf) != 0) { free(wh_buf); return; }
+  std::lock_guard<std::mutex> cl(g_cache_mutex);
+  auto [it, inserted] = g_wh_cache.emplace(key, wh_buf);
+  if (!inserted) free(wh_buf);
+}
+
+// ---------------------------------------------------------------------------
 // sgemm_hmx
 // ---------------------------------------------------------------------------
 
@@ -191,25 +281,22 @@ bool sgemm_hmx(bool TransB,
     if (it != g_wh_cache.end()) wh_buf = it->second;
   }
   if (!wh_buf) {
-    // First call for this weight: convert FP32→FP16 and apply WH layout.
     wh_buf = static_cast<_Float16 *>(malloc(w_bytes));
     if (!wh_buf) { HEXKL_LOGE("malloc wh_buf(%zu) failed", w_bytes); return false; }
 
-    if (TransB) {
-      for (unsigned n = 0; n < N; ++n)
-        for (unsigned k = 0; k < K; ++k)
-          wh_buf[n * K + k] = (_Float16)B[(size_t)n * ldb + k];
-    } else {
-      for (unsigned n = 0; n < N; ++n)
-        for (unsigned k = 0; k < K; ++k)
-          wh_buf[n * K + k] = (_Float16)B[(size_t)k * ldb + n];
-    }
+    // NEON-vectorized FP32→FP16 (+ transpose for TransB=false).
+    f32_to_f16_convert(wh_buf, B, N, K, ldb, TransB);
+    int64_t t_cvt = now_us();
 
     if (sdkl_cpu_rm_to_wh_f16_inplace(N, K, wh_buf) != 0) {
       HEXKL_LOGE("sdkl_cpu_rm_to_wh_f16_inplace failed N=%u K=%u", N, K);
       free(wh_buf);
       return false;
     }
+    int64_t t_wh = now_us();
+    // Split log on first build: shows convert vs WH-layout cost separately.
+    HEXKL_LOGI("WH build N=%u K=%u: cvt=%lldus wh=%lldus",
+               N, K, (long long)(t_cvt - t0), (long long)(t_wh - t_cvt));
 
     {
       std::lock_guard<std::mutex> cache_lock(g_cache_mutex);
@@ -336,16 +423,36 @@ bool shgemm_hmx(bool TransB,
     wh_buf = static_cast<_Float16 *>(malloc(w_bytes));
     if (!wh_buf) { HEXKL_LOGE("malloc wh_buf(%zu) failed", w_bytes); return false; }
 
+    // B is already FP16 — only transpose if needed (no FP32→FP16 conversion).
     if (TransB) {
-      // B is [N × K] row-major
-      for (unsigned n = 0; n < N; ++n)
-        for (unsigned k = 0; k < K; ++k)
-          wh_buf[n * K + k] = (_Float16)B_f16[(size_t)n * ldb + k];
+      for (unsigned n = 0; n < N; ++n) {
+        const __fp16 *brow = B_f16 + (size_t)n * ldb;
+        _Float16     *drow = wh_buf + (size_t)n * K;
+        unsigned k = 0;
+        for (; k + 8 <= K; k += 8)
+          vst1q_f16((__fp16 *)(drow + k), vld1q_f16(brow + k));
+        for (; k < K; ++k) drow[k] = (_Float16)brow[k];
+      }
     } else {
-      // B is [K × N] row-major — transpose to [N × K]
-      for (unsigned n = 0; n < N; ++n)
-        for (unsigned k = 0; k < K; ++k)
-          wh_buf[n * K + k] = (_Float16)B_f16[(size_t)k * ldb + n];
+      const unsigned BK = 4, BN = 32;
+      for (unsigned k0 = 0; k0 < K; k0 += BK) {
+        unsigned k_end = k0 + BK < K ? k0 + BK : K;
+        for (unsigned n0 = 0; n0 < N; n0 += BN) {
+          unsigned n_end = n0 + BN < N ? n0 + BN : N;
+          for (unsigned k = k0; k < k_end; ++k) {
+            const __fp16 *brow = B_f16 + (size_t)k * ldb + n0;
+            unsigned n = n0;
+            for (; n + 8 <= n_end; n += 8) {
+              float16x8_t v = vld1q_f16(brow + (n - n0));
+              __fp16 tmp[8]; vst1q_f16(tmp, v);
+              for (int i = 0; i < 8; ++i)
+                wh_buf[(size_t)(n+i) * K + k] = (_Float16)tmp[i];
+            }
+            for (; n < n_end; ++n)
+              wh_buf[(size_t)n * K + k] = (_Float16)brow[n - n0];
+          }
+        }
+      }
     }
 
     if (sdkl_cpu_rm_to_wh_f16_inplace(N, K, wh_buf) != 0) {

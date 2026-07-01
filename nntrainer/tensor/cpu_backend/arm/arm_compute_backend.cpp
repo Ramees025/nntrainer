@@ -359,26 +359,19 @@ void sgemm(const unsigned int TStorageOrder, bool TransA, bool TransB,
            const float *B, const unsigned int ldb, const float beta, float *C,
            const unsigned int ldc) {
 #ifdef USE_HMX
-  // Log the first mismatch to understand which guard condition is failing.
-  static bool s_first_guard_check = true;
-  if (s_first_guard_check && M > 1) {
-    s_first_guard_check = false;
-    __android_log_print(ANDROID_LOG_INFO, "nntr_hexkl",
-      "sgemm guard M=%u N=%u K=%u TStorageOrder=%u TransA=%d TransB=%d "
-      "alpha=%.1f beta=%.1f lda=%u ldc=%u (K=%u N=%u)",
-      M, N, K, TStorageOrder, (int)TransA, (int)TransB,
-      alpha, beta, lda, ldc, K, N);
-  }
-  // Offload prefill (M > 1) to HMX. Conditions:
-  //   - Row-major storage (TStorageOrder == 0)
-  //   - A is not transposed (handles standard input layout)
-  //   - Standard scaling (alpha == 1.0, beta == 0.0)
-  //   - Contiguous matrices (lda == K, ldc == N) — SDKL has no stride param
-  if (M > 1 && TStorageOrder == 0 && !TransA &&
+  if (TStorageOrder == 0 && !TransA &&
       alpha == 1.0f && beta == 0.0f && lda == K && ldc == N) {
-    if (hexkl::sgemm_hmx(TransB, M, N, K, A, lda, B, ldb, C, ldc))
-      return;
-    // Fall through to CPU on failure
+    if (M > 1) {
+      // Prefill: dispatch to HMX (WH cache built on first call, reused after).
+      if (hexkl::sgemm_hmx(TransB, M, N, K, A, lda, B, ldb, C, ldc))
+        return;
+      // Fall through to CPU on failure.
+    } else {
+      // Decode (M == 1): too small for HMX, but opportunistically warm the
+      // WH cache so the NEXT prefill skips the build cost entirely.
+      if (!hexkl::is_weight_cached(TransB, N, K, B))
+        hexkl::preload_weight_f32(TransB, N, K, B, ldb);
+    }
   }
 #endif
 #ifdef USE_BLAS

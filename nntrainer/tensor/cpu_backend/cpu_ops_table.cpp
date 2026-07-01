@@ -29,17 +29,6 @@ public:
                   unsigned int N, unsigned int K, float a, const float *A,
                   unsigned int lda, const float *B, unsigned int ldb, float b,
                   float *C, unsigned int ldc) override {
-    static bool logged = false;
-    if (!logged) {
-      logged = true;
-      __android_log_print(ANDROID_LOG_INFO, "nntr_hexkl",
-        "sgemm_fp32 FIRST CALL M=%u N=%u K=%u o=%u tA=%d tB=%d a=%.1f b=%.1f lda=%u ldc=%u",
-        M, N, K, o, (int)tA, (int)tB, a, b, lda, ldc);
-    }
-    if (M > 1 && !logged) {
-      __android_log_print(ANDROID_LOG_INFO, "nntr_hexkl",
-        "sgemm_fp32 M>1 M=%u N=%u K=%u", M, N, K);
-    }
     nntrainer::sgemm(o, tA, tB, M, N, K, a, A, lda, B, ldb, b, C, ldc);
   }
   void sgemv_fp32(unsigned int o, bool tA, unsigned int M, unsigned int N,

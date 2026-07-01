@@ -12,6 +12,18 @@ void initialize();
 void finalize();
 
 /**
+ * @brief Pre-build the WH-layout cache entry for a FP32 weight (no dispatch).
+ *
+ * Call this on M=1 decode steps or right after model loading so that the first
+ * real prefill (M > 1) skips the build and goes straight to HMX dispatch.
+ */
+void preload_weight_f32(bool TransB, unsigned N, unsigned K,
+                        const float *B, unsigned ldb);
+
+/** @brief Returns true if this weight's WH-layout is already cached. */
+bool is_weight_cached(bool TransB, unsigned N, unsigned K, const float *B);
+
+/**
  * @brief Dispatch a prefill-phase SGEMM (FP32×FP32) to HMX.
  *
  * Converts FP32 weight B to FP16 WH-layout on first call (cached for reuse),
