@@ -24,6 +24,10 @@
 #include <neon_impl.h>
 #include <nntrainer_error.h>
 #include <q4_0_utils.h>
+#ifdef USE_HMX
+#include <hexkl_backend.h>
+#include <android/log.h>
+#endif
 
 namespace nntrainer {
 
@@ -34,6 +38,9 @@ void init_backend() {
   __openblas_set_num_threads(-1); // -1 = BLAS_NUM_THREADS if defined.
 #endif
   g_compute_ops = get_cpu_ops();
+#ifdef USE_HMX
+  hexkl::initialize();
+#endif
 }
 
 void unpack_q4_0x8_transpose16(const void *src, uint16_t *d_out,
@@ -351,6 +358,29 @@ void sgemm(const unsigned int TStorageOrder, bool TransA, bool TransB,
            const float alpha, const float *A, const unsigned int lda,
            const float *B, const unsigned int ldb, const float beta, float *C,
            const unsigned int ldc) {
+#ifdef USE_HMX
+  // Log the first mismatch to understand which guard condition is failing.
+  static bool s_first_guard_check = true;
+  if (s_first_guard_check && M > 1) {
+    s_first_guard_check = false;
+    __android_log_print(ANDROID_LOG_INFO, "nntr_hexkl",
+      "sgemm guard M=%u N=%u K=%u TStorageOrder=%u TransA=%d TransB=%d "
+      "alpha=%.1f beta=%.1f lda=%u ldc=%u (K=%u N=%u)",
+      M, N, K, TStorageOrder, (int)TransA, (int)TransB,
+      alpha, beta, lda, ldc, K, N);
+  }
+  // Offload prefill (M > 1) to HMX. Conditions:
+  //   - Row-major storage (TStorageOrder == 0)
+  //   - A is not transposed (handles standard input layout)
+  //   - Standard scaling (alpha == 1.0, beta == 0.0)
+  //   - Contiguous matrices (lda == K, ldc == N) — SDKL has no stride param
+  if (M > 1 && TStorageOrder == 0 && !TransA &&
+      alpha == 1.0f && beta == 0.0f && lda == K && ldc == N) {
+    if (hexkl::sgemm_hmx(TransB, M, N, K, A, lda, B, ldb, C, ldc))
+      return;
+    // Fall through to CPU on failure
+  }
+#endif
 #ifdef USE_BLAS
   __cblas_sgemm(TStorageOrder, TransA, TransB, M, N, K, alpha, A, lda, B, ldb,
                 beta, C, ldc);
