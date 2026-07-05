@@ -86,8 +86,17 @@ struct WeightKeyHash {
   }
 };
 
-// Values are regular malloc'd [N×K] FP16 in WH layout.
+// FP16 WH cache (used by sgemm_hmx / shgemm_hmx paths)
 static std::unordered_map<WeightKey, _Float16 *, WeightKeyHash> g_wh_cache;
+
+// INT8 WH cache (used by sgemm_hmx_i8 path)
+struct WeightI8Entry {
+  int8_t* wh_buf;    // malloc'd INT8 WH layout [N×K]
+  float*  bias128;   // malloc'd float[N]: 128.0f * sum_k(W_i8[n,k])
+  float   w_scale;
+};
+static std::unordered_map<WeightKey, WeightI8Entry, WeightKeyHash> g_wh_i8_cache;
+
 static std::mutex g_cache_mutex;
 
 // ---------------------------------------------------------------------------
@@ -96,16 +105,21 @@ static std::mutex g_cache_mutex;
 
 static std::mutex g_hmx_mutex;   // serializes HMX dispatch + g_W_buf/stage access
 
-// W: single sdkl_npu_alloc buffer (DSP-accessible). WH-layout is memcpy'd
-// from g_wh_cache each dispatch — much cheaper than full FP32→FP16+WH.
-static _Float16 *g_W_buf        = nullptr;
-static size_t    g_W_buf_bytes  = 0;
-
-// X / C: plain malloc (per SDKL example — only W requires sdkl_npu_alloc)
-static float    *g_X_stage      = nullptr;
+// FP16 path — single sdkl_npu_alloc W buffer; X/C are plain malloc.
+static _Float16 *g_W_buf         = nullptr;
+static size_t    g_W_buf_bytes   = 0;
+static float    *g_X_stage       = nullptr;
 static size_t    g_X_stage_bytes = 0;
-static float    *g_C_stage      = nullptr;
+static float    *g_C_stage       = nullptr;
 static size_t    g_C_stage_bytes = 0;
+
+// INT8 path — three sdkl_npu_alloc buffers (W, X, C all NPU-visible).
+static int8_t   *g_W_i8_buf      = nullptr;
+static size_t    g_W_i8_buf_bytes = 0;
+static uint8_t  *g_X_u8_buf      = nullptr;
+static size_t    g_X_u8_buf_bytes = 0;
+static int32_t  *g_C_i32_buf     = nullptr;
+static size_t    g_C_i32_buf_bytes = 0;
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -210,15 +224,23 @@ void finalize() {
     std::lock_guard<std::mutex> lock(g_cache_mutex);
     for (auto &kv : g_wh_cache) free(kv.second);
     g_wh_cache.clear();
+    for (auto &kv : g_wh_i8_cache) {
+      free(kv.second.wh_buf);
+      free(kv.second.bias128);
+    }
+    g_wh_i8_cache.clear();
   }
 
   std::lock_guard<std::mutex> lock(g_hmx_mutex);
-  if (g_W_buf)   { sdkl_npu_free(g_W_buf);   g_W_buf   = nullptr; g_W_buf_bytes   = 0; }
-  if (g_X_stage) { free(g_X_stage);           g_X_stage = nullptr; g_X_stage_bytes = 0; }
-  if (g_C_stage) { free(g_C_stage);           g_C_stage = nullptr; g_C_stage_bytes = 0; }
+  if (g_W_buf)     { sdkl_npu_free(g_W_buf);     g_W_buf     = nullptr; g_W_buf_bytes     = 0; }
+  if (g_X_stage)   { free(g_X_stage);             g_X_stage   = nullptr; g_X_stage_bytes   = 0; }
+  if (g_C_stage)   { free(g_C_stage);             g_C_stage   = nullptr; g_C_stage_bytes   = 0; }
+  if (g_W_i8_buf)  { sdkl_npu_free(g_W_i8_buf);  g_W_i8_buf  = nullptr; g_W_i8_buf_bytes  = 0; }
+  if (g_X_u8_buf)  { sdkl_npu_free(g_X_u8_buf);  g_X_u8_buf  = nullptr; g_X_u8_buf_bytes  = 0; }
+  if (g_C_i32_buf) { sdkl_npu_free(g_C_i32_buf); g_C_i32_buf = nullptr; g_C_i32_buf_bytes = 0; }
 
   sdkl_npu_finalize(g_domain);
-  HEXKL_LOGI("HexKL finalized — total sgemm_hmx calls: %d", g_call_count);
+  HEXKL_LOGI("HexKL finalized — total dispatch calls: %d", g_call_count);
 }
 
 // ---------------------------------------------------------------------------
@@ -227,11 +249,13 @@ void finalize() {
 // the first real prefill (M > 1) hits the cache and skips the build cost.
 // ---------------------------------------------------------------------------
 
+// is_weight_cached / preload_weight_f32 operate on the INT8 cache since
+// sgemm_hmx_i8 is the primary FP32-weight dispatch path.
 bool is_weight_cached(bool TransB, unsigned N, unsigned K, const float *B) {
   if (!g_initialized) return false;
   WeightKey key{reinterpret_cast<uintptr_t>(B), N, K, TransB};
   std::lock_guard<std::mutex> cl(g_cache_mutex);
-  return g_wh_cache.count(key) != 0;
+  return g_wh_i8_cache.count(key) != 0;
 }
 
 void preload_weight_f32(bool TransB, unsigned N, unsigned K,
@@ -240,16 +264,345 @@ void preload_weight_f32(bool TransB, unsigned N, unsigned K,
   WeightKey key{reinterpret_cast<uintptr_t>(B), N, K, TransB};
   {
     std::lock_guard<std::mutex> cl(g_cache_mutex);
-    if (g_wh_cache.count(key)) return;  // already cached
+    if (g_wh_i8_cache.count(key)) return;
   }
-  const size_t w_bytes = (size_t)N * K * sizeof(_Float16);
-  _Float16 *wh_buf = static_cast<_Float16 *>(malloc(w_bytes));
-  if (!wh_buf) return;
-  f32_to_f16_convert(wh_buf, B, N, K, ldb, TransB);
-  if (sdkl_cpu_rm_to_wh_f16_inplace(N, K, wh_buf) != 0) { free(wh_buf); return; }
+  const size_t w_bytes = (size_t)N * K * sizeof(int8_t);
+  int8_t* w_i8   = static_cast<int8_t*>(malloc(w_bytes));
+  float*  bias128 = static_cast<float*>(malloc(N * sizeof(float)));
+  if (!w_i8 || !bias128) { free(w_i8); free(bias128); return; }
+
+  // Find max |B| for scale
+  float max_abs = 1e-8f;
+  if (TransB) {
+    for (unsigned n = 0; n < N; ++n)
+      for (unsigned k = 0; k < K; ++k) {
+        float v = B[n*ldb+k]; if (v < 0) v = -v;
+        if (v > max_abs) max_abs = v;
+      }
+  } else {
+    for (unsigned k = 0; k < K; ++k)
+      for (unsigned n = 0; n < N; ++n) {
+        float v = B[k*ldb+n]; if (v < 0) v = -v;
+        if (v > max_abs) max_abs = v;
+      }
+  }
+  float w_scale = max_abs / 127.0f;
+  float inv_scale = 1.0f / w_scale;
+  if (TransB) {
+    for (unsigned n = 0; n < N; ++n) {
+      float bsum = 0.0f;
+      for (unsigned k = 0; k < K; ++k) {
+        int q = (int)rintf(B[n*ldb+k] * inv_scale);
+        if (q > 127) q = 127; if (q < -127) q = -127;
+        w_i8[n*K+k] = (int8_t)q; bsum += (float)q;
+      }
+      bias128[n] = 128.0f * bsum;
+    }
+  } else {
+    for (unsigned n = 0; n < N; ++n) bias128[n] = 0.0f;
+    for (unsigned k = 0; k < K; ++k)
+      for (unsigned n = 0; n < N; ++n) {
+        int q = (int)rintf(B[k*ldb+n] * inv_scale);
+        if (q > 127) q = 127; if (q < -127) q = -127;
+        w_i8[n*K+k] = (int8_t)q; bias128[n] += (float)q;
+      }
+    for (unsigned n = 0; n < N; ++n) bias128[n] *= 128.0f;
+  }
+  if (sdkl_cpu_rm_to_wh_i8_inplace(N, K, w_i8) != 0) {
+    free(w_i8); free(bias128); return;
+  }
+  WeightI8Entry entry{w_i8, bias128, w_scale};
   std::lock_guard<std::mutex> cl(g_cache_mutex);
-  auto [it, inserted] = g_wh_cache.emplace(key, wh_buf);
-  if (!inserted) free(wh_buf);
+  auto [it, inserted] = g_wh_i8_cache.emplace(key, entry);
+  if (!inserted) { free(w_i8); free(bias128); }
+}
+
+// ---------------------------------------------------------------------------
+// INT8 helpers
+// ---------------------------------------------------------------------------
+
+// Quantize FP32 weight B[N×K] (or B[K×N] if !TransB) → INT8 WH layout.
+// Returns w_scale; fills out_bias128[n] = 128 * sum_k(W_i8[n,k]).
+static float quantize_weight_fp32_to_i8(
+    int8_t* __restrict__ out_i8,
+    float*  __restrict__ out_bias128,
+    const float* __restrict__ B,
+    unsigned N, unsigned K, unsigned ldb, bool TransB)
+{
+  float max_abs = 1e-8f;
+  if (TransB) {
+    for (unsigned n = 0; n < N; ++n)
+      for (unsigned k = 0; k < K; ++k) {
+        float v = B[n*ldb+k]; if (v < 0) v = -v;
+        if (v > max_abs) max_abs = v;
+      }
+  } else {
+    for (unsigned k = 0; k < K; ++k)
+      for (unsigned n = 0; n < N; ++n) {
+        float v = B[k*ldb+n]; if (v < 0) v = -v;
+        if (v > max_abs) max_abs = v;
+      }
+  }
+  const float w_scale   = max_abs / 127.0f;
+  const float inv_scale = 1.0f   / w_scale;
+
+  if (TransB) {
+    for (unsigned n = 0; n < N; ++n) {
+      const float* brow = B + (size_t)n * ldb;
+      int8_t*      drow = out_i8 + (size_t)n * K;
+      float bsum = 0.0f;
+      unsigned k = 0;
+      for (; k + 4 <= K; k += 4) {
+        float32x4_t v = vmulq_n_f32(vld1q_f32(brow + k), inv_scale);
+        int32x4_t   q = vcvtaq_s32_f32(v);
+        q = vmaxq_s32(vminq_s32(q, vdupq_n_s32(127)), vdupq_n_s32(-127));
+        int32_t tmp[4]; vst1q_s32(tmp, q);
+        drow[k]   = (int8_t)tmp[0]; bsum += (float)tmp[0];
+        drow[k+1] = (int8_t)tmp[1]; bsum += (float)tmp[1];
+        drow[k+2] = (int8_t)tmp[2]; bsum += (float)tmp[2];
+        drow[k+3] = (int8_t)tmp[3]; bsum += (float)tmp[3];
+      }
+      for (; k < K; ++k) {
+        int q = (int)rintf(brow[k] * inv_scale);
+        if (q > 127) q = 127; if (q < -127) q = -127;
+        drow[k] = (int8_t)q; bsum += (float)q;
+      }
+      out_bias128[n] = 128.0f * bsum;
+    }
+  } else {
+    // B is [K×N] — produce out_i8 as [N×K]
+    for (unsigned n = 0; n < N; ++n) out_bias128[n] = 0.0f;
+    for (unsigned k = 0; k < K; ++k) {
+      const float* brow = B + (size_t)k * ldb;
+      for (unsigned n = 0; n < N; ++n) {
+        int q = (int)rintf(brow[n] * inv_scale);
+        if (q > 127) q = 127; if (q < -127) q = -127;
+        out_i8[(size_t)n * K + k] = (int8_t)q;
+        out_bias128[n] += (float)q;
+      }
+    }
+    for (unsigned n = 0; n < N; ++n) out_bias128[n] *= 128.0f;
+  }
+  return w_scale;
+}
+
+// Quantize FP32 activations A[M×K] (contiguous) → UINT8 x_u8[M_pad×K].
+// Zero-point = 128 (symmetric: 0.0f maps to 128).
+// Returns x_scale.
+static float quant_fp32_to_u8(uint8_t* __restrict__ x_u8,
+                               const float* __restrict__ A,
+                               unsigned M, unsigned K, unsigned M_pad)
+{
+  const unsigned total = M * K;
+  // NEON find max |A|
+  float32x4_t vmax4 = vdupq_n_f32(0.0f);
+  unsigned i = 0;
+  for (; i + 4 <= total; i += 4)
+    vmax4 = vmaxq_f32(vmax4, vabsq_f32(vld1q_f32(A + i)));
+  float max_abs = vmaxvq_f32(vmax4);
+  for (; i < total; ++i) {
+    float v = A[i]; if (v < 0) v = -v;
+    if (v > max_abs) max_abs = v;
+  }
+  if (max_abs < 1e-8f) max_abs = 1e-8f;
+  const float x_scale   = max_abs / 127.0f;
+  const float inv_scale = 1.0f   / x_scale;
+
+  float32x4_t vscale = vdupq_n_f32(inv_scale);
+  float32x4_t voff   = vdupq_n_f32(128.0f);
+  i = 0;
+  for (; i + 8 <= total; i += 8) {
+    float32x4_t v0 = vmlaq_f32(voff, vld1q_f32(A + i),     vscale);
+    float32x4_t v1 = vmlaq_f32(voff, vld1q_f32(A + i + 4), vscale);
+    int32x4_t   i0 = vcvtaq_s32_f32(v0);
+    int32x4_t   i1 = vcvtaq_s32_f32(v1);
+    // saturating narrow s32→u16→u8: clamps to [0, 255]
+    uint8x8_t u8 = vqmovn_u16(
+                     vcombine_u16(vqmovun_s32(i0), vqmovun_s32(i1)));
+    vst1_u8(x_u8 + i, u8);
+  }
+  for (; i < total; ++i) {
+    int q = (int)rintf(A[i] * inv_scale) + 128;
+    x_u8[i] = (uint8_t)(q < 0 ? 0 : q > 255 ? 255 : q);
+  }
+  // Pad remaining rows with 128 (encodes 0.0f)
+  if (M_pad > M)
+    memset(x_u8 + total, 128, (size_t)(M_pad - M) * K);
+  return x_scale;
+}
+
+// Dequantize INT32 output → FP32 with bias correction:
+// C[m,n] = combined * (C_i32[m,n] - bias128[n])
+// where combined = x_scale * w_scale, bias128[n] = 128 * sum_k(W_i8[n,k]).
+static void dequant_i32_to_f32(float* __restrict__ C, unsigned ldc,
+                                const int32_t* __restrict__ C_i32,
+                                unsigned N,
+                                const float* __restrict__ bias128,
+                                float combined, unsigned M)
+{
+  float32x4_t vcomb = vdupq_n_f32(combined);
+  for (unsigned m = 0; m < M; ++m) {
+    const int32_t* row_i = C_i32 + (size_t)m * N;
+    float*         row_o = C     + (size_t)m * ldc;
+    unsigned n = 0;
+    for (; n + 4 <= N; n += 4) {
+      float32x4_t vi = vcvtq_f32_s32(vld1q_s32(row_i + n));
+      float32x4_t vb = vld1q_f32(bias128 + n);
+      vst1q_f32(row_o + n, vmulq_f32(vcomb, vsubq_f32(vi, vb)));
+    }
+    for (; n < N; ++n)
+      row_o[n] = combined * ((float)row_i[n] - bias128[n]);
+  }
+}
+
+// INT8 timing accumulators (separate from FP16 g_t_* counters)
+static int64_t g_i8_cache_us = 0, g_i8_quant_us = 0,
+               g_i8_lock_us  = 0, g_i8_dsp_us   = 0,
+               g_i8_unlock_us = 0, g_i8_deq_us   = 0;
+static int     g_i8_call_count = 0;
+
+// ---------------------------------------------------------------------------
+// sgemm_hmx_i8: FP32×FP32 → INT8 quantize → HMX u8i8_i32 → FP32 dequant
+// ---------------------------------------------------------------------------
+
+bool sgemm_hmx_i8(bool TransB,
+                  unsigned int M, unsigned int N, unsigned int K,
+                  const float *A, unsigned int lda,
+                  const float *B, unsigned int ldb,
+                  float *C, unsigned int ldc) {
+  if (!g_initialized) return false;
+
+  // INT8 HMX: M must be a multiple of 64.
+  const unsigned M_pad    = ((M + 63u) / 64u) * 64u;
+  const size_t   w_bytes  = (size_t)N * K * sizeof(int8_t);
+  const size_t   xu_bytes = (size_t)M_pad * K * sizeof(uint8_t);
+  const size_t   ci_bytes = (size_t)M_pad * N * sizeof(int32_t);
+
+  int64_t t0, t1, t2, t3, t4, t5, t6;
+  t0 = now_us();
+
+  // --- 1. Weight cache lookup or build ---
+  WeightKey key{reinterpret_cast<uintptr_t>(B), N, K, TransB};
+  WeightI8Entry entry{};
+  {
+    std::lock_guard<std::mutex> cl(g_cache_mutex);
+    auto it = g_wh_i8_cache.find(key);
+    if (it != g_wh_i8_cache.end()) entry = it->second;
+  }
+  if (!entry.wh_buf) {
+    int8_t* w_i8   = static_cast<int8_t*>(malloc(w_bytes));
+    float*  bias128 = static_cast<float*>(malloc(N * sizeof(float)));
+    if (!w_i8 || !bias128) {
+      free(w_i8); free(bias128);
+      HEXKL_LOGE("malloc failed w_bytes=%zu N=%u", w_bytes, N);
+      return false;
+    }
+    int64_t tq0 = now_us();
+    float w_scale = quantize_weight_fp32_to_i8(w_i8, bias128, B, N, K, ldb, TransB);
+    int64_t tq1 = now_us();
+    if (sdkl_cpu_rm_to_wh_i8_inplace(N, K, w_i8) != 0) {
+      HEXKL_LOGE("sdkl_cpu_rm_to_wh_i8_inplace failed N=%u K=%u", N, K);
+      free(w_i8); free(bias128); return false;
+    }
+    int64_t tq2 = now_us();
+    HEXKL_LOGI("I8 WH build N=%u K=%u: quant=%lldus wh=%lldus",
+               N, K, (long long)(tq1-tq0), (long long)(tq2-tq1));
+
+    WeightI8Entry new_entry{w_i8, bias128, w_scale};
+    {
+      std::lock_guard<std::mutex> cl(g_cache_mutex);
+      auto [it, inserted] = g_wh_i8_cache.emplace(key, new_entry);
+      if (!inserted) { free(w_i8); free(bias128); entry = it->second; }
+      else           { entry = new_entry; }
+    }
+  }
+  t1 = now_us();
+
+  std::lock_guard<std::mutex> lock(g_hmx_mutex);
+
+  // --- 2. Grow W_i8 NPU buffer if needed ---
+  if (w_bytes > g_W_i8_buf_bytes) {
+    if (g_W_i8_buf) sdkl_npu_free(g_W_i8_buf);
+    g_W_i8_buf = nullptr; g_W_i8_buf_bytes = 0;
+    if (sdkl_npu_alloc(w_bytes, reinterpret_cast<void**>(&g_W_i8_buf)) != 0 || !g_W_i8_buf) {
+      HEXKL_LOGE("sdkl_npu_alloc W_i8(%zu) failed", w_bytes); return false;
+    }
+    g_W_i8_buf_bytes = w_bytes;
+    HEXKL_LOGI("W_i8_buf grown to %zu bytes", w_bytes);
+  }
+  memcpy(g_W_i8_buf, entry.wh_buf, w_bytes);
+
+  // --- 3. Grow X_u8 NPU buffer if needed ---
+  if (xu_bytes > g_X_u8_buf_bytes) {
+    if (g_X_u8_buf) sdkl_npu_free(g_X_u8_buf);
+    g_X_u8_buf = nullptr; g_X_u8_buf_bytes = 0;
+    if (sdkl_npu_alloc(xu_bytes, reinterpret_cast<void**>(&g_X_u8_buf)) != 0 || !g_X_u8_buf) {
+      HEXKL_LOGE("sdkl_npu_alloc X_u8(%zu) failed", xu_bytes); return false;
+    }
+    g_X_u8_buf_bytes = xu_bytes;
+  }
+
+  // --- 4. Grow C_i32 NPU buffer if needed ---
+  if (ci_bytes > g_C_i32_buf_bytes) {
+    if (g_C_i32_buf) sdkl_npu_free(g_C_i32_buf);
+    g_C_i32_buf = nullptr; g_C_i32_buf_bytes = 0;
+    if (sdkl_npu_alloc(ci_bytes, reinterpret_cast<void**>(&g_C_i32_buf)) != 0 || !g_C_i32_buf) {
+      HEXKL_LOGE("sdkl_npu_alloc C_i32(%zu) failed", ci_bytes); return false;
+    }
+    g_C_i32_buf_bytes = ci_bytes;
+  }
+
+  // --- 5. Quantize activations FP32 → UINT8 (NEON, per-dispatch) ---
+  float x_scale = quant_fp32_to_u8(g_X_u8_buf, A, M, K, M_pad);
+  t2 = now_us();
+
+  // --- 6. HMX dispatch ---
+  if (sdkl_npu_lock_hmx(g_domain) != 0) {
+    HEXKL_LOGE("sdkl_npu_lock_hmx failed"); return false;
+  }
+  t3 = now_us();
+
+  int ret = sdkl_npu_mm_u8i8_i32(g_domain, (int)M_pad, (int)N, (int)K,
+                                  g_C_i32_buf, g_X_u8_buf, g_W_i8_buf);
+  t4 = now_us();
+  sdkl_npu_unlock_hmx(g_domain);
+  t5 = now_us();
+
+  // --- 7. Dequantize INT32 → FP32 with bias correction ---
+  if (ret == 0) {
+    float combined = x_scale * entry.w_scale;
+    dequant_i32_to_f32(C, ldc, g_C_i32_buf, N, entry.bias128, combined, M);
+  } else {
+    HEXKL_LOGE("sdkl_npu_mm_u8i8_i32 failed: %d (M=%u M_pad=%u N=%u K=%u)",
+               ret, M, M_pad, N, K);
+  }
+  t6 = now_us();
+
+  g_i8_cache_us  += t1 - t0;
+  g_i8_quant_us  += t2 - t1;
+  g_i8_lock_us   += t3 - t2;
+  g_i8_dsp_us    += t4 - t3;
+  g_i8_unlock_us += t5 - t4;
+  g_i8_deq_us    += t6 - t5;
+  ++g_i8_call_count;
+
+  if (g_i8_call_count == 1 || g_i8_call_count % 196 == 0) {
+    HEXKL_LOGI("I8_TIMING call=%d M=%u N=%u K=%u: "
+               "cache=%lldus quant=%lldus lock=%lldus dsp=%lldus unlock=%lldus deq=%lldus",
+               g_i8_call_count, M, N, K,
+               (long long)g_i8_cache_us,  (long long)g_i8_quant_us,
+               (long long)g_i8_lock_us,   (long long)g_i8_dsp_us,
+               (long long)g_i8_unlock_us, (long long)g_i8_deq_us);
+  }
+  if (g_i8_call_count % 196 == 0) {
+    int64_t total = g_i8_cache_us + g_i8_quant_us + g_i8_lock_us +
+                    g_i8_dsp_us + g_i8_unlock_us + g_i8_deq_us;
+    HEXKL_LOGI("I8_PASS call=%d total=%lldms", g_i8_call_count, (long long)(total/1000));
+    g_i8_cache_us = g_i8_quant_us = g_i8_lock_us =
+    g_i8_dsp_us   = g_i8_unlock_us = g_i8_deq_us = 0;
+  }
+
+  return ret == 0;
 }
 
 // ---------------------------------------------------------------------------

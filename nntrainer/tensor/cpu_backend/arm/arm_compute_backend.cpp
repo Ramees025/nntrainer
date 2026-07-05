@@ -363,7 +363,7 @@ void sgemm(const unsigned int TStorageOrder, bool TransA, bool TransB,
       alpha == 1.0f && beta == 0.0f && lda == K && ldc == N) {
     if (M > 1) {
       // Prefill: dispatch to HMX (WH cache built on first call, reused after).
-      if (hexkl::sgemm_hmx(TransB, M, N, K, A, lda, B, ldb, C, ldc))
+      if (hexkl::sgemm_hmx_i8(TransB, M, N, K, A, lda, B, ldb, C, ldc))
         return;
       // Fall through to CPU on failure.
     } else {

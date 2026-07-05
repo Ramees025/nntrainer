@@ -24,7 +24,23 @@ void preload_weight_f32(bool TransB, unsigned N, unsigned K,
 bool is_weight_cached(bool TransB, unsigned N, unsigned K, const float *B);
 
 /**
- * @brief Dispatch a prefill-phase SGEMM (FP32×FP32) to HMX.
+ * @brief Dispatch a prefill-phase SGEMM (FP32×FP32) to HMX via INT8.
+ *
+ * Quantizes FP32 weight B to symmetric INT8 WH-layout on first call (cached),
+ * quantizes FP32 activation A to UINT8 per-dispatch, then dispatches via
+ * sdkl_npu_mm_u8i8_i32. Output INT32 is dequantized back to FP32.
+ * Bias correction (zero_point=128) is pre-computed with the weight cache.
+ *
+ * @return true if dispatched to HMX; false to fall back to CPU.
+ */
+bool sgemm_hmx_i8(bool TransB,
+                  unsigned int M, unsigned int N, unsigned int K,
+                  const float *A, unsigned int lda,
+                  const float *B, unsigned int ldb,
+                  float *C, unsigned int ldc);
+
+/**
+ * @brief Dispatch a prefill-phase SGEMM (FP32×FP32) to HMX via FP16.
  *
  * Converts FP32 weight B to FP16 WH-layout on first call (cached for reuse),
  * then dispatches C[M×N] = A[M×K] * op(B) via sdkl_npu_mm_f32f16_f32.
